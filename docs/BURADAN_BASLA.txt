@@ -1,0 +1,53 @@
+OPTİK ANALİZ — DOKÜMANTASYON
+════════════════════════════════════════════════════════
+
+Bu klasörde kullanım kılavuzunun üç biçimi var. Hangisini
+açacağınız size kalmış — içerikleri aynıdır:
+
+  KULLANIM_KILAVUZU.pdf    ← Yazdırmak/paylaşmak için (14 sayfa)
+  KULLANIM_KILAVUZU.html   ← Tarayıcıda okumak için (çift tıklayın)
+  KULLANIM_KILAVUZU.md     ← VS Code'da düzenlemek için
+
+  gorseller/               Kılavuzdaki ekran görüntüleri
+
+
+HIZLI BAŞLANGIÇ
+────────────────────────────────────────────────────────
+
+1) Projeyi VS Code'da açın:
+
+      code /home/test123/Desktop/optik_analiz
+
+2) Arayüzü başlatın:
+
+      F5 tuşuna basın  →  "Arayüzü başlat (GUI)"
+
+   ya da terminalden:
+
+      cd /home/test123/Desktop/optik_analiz
+      python3 run_gui.py
+
+3) Arayüzde:
+
+      Ground truth seç…  →  referans görüntü
+      Dedektör görüntüsü seç…  →  çekilen görüntü
+      ANALİZ ET  →  sonuçlar sağ panelde
+
+
+UNUTMAYIN
+────────────────────────────────────────────────────────
+
+• Tilt için ASIL güvenilecek değer "Düzlem-dışı tilt"
+  satırıdır. "Keystone X/Y" ikincildir (ölçek/kadraj
+  farkına duyarlı).
+
+• Analiz sonrası "Hizalama (overlay)" sekmesine bakın.
+  Geniş SARI alanlar = iyi hizalama. Kırmızı/yeşil
+  ayrışmışsa sonuca güvenmeyin.
+
+• Tespit güveni 0.7'nin altındaysa yıldız net
+  seçilememiştir.
+
+
+Ayrıntılar için KULLANIM_KILAVUZU.pdf dosyasına bakın.
+Geliştirme notları: optik_analiz/DEVAM_YONERGESI.md
