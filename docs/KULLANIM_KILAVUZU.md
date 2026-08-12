@@ -1,4 +1,6 @@
-**Sürüm:** 1.0 · **Tarih:** 12 Ağustos 2026
+# OPTİK ANALİZ — KULLANIM KILAVUZU
+
+**Sürüm:** 2.0 · **Tarih:** 12 Ağustos 2026
 **Proje konumu:** `/home/test123/Desktop/optik_analiz/`
 
 ---
@@ -127,19 +129,100 @@ Sol panelin altındaki mavi **ANALİZ ET** butonuna basın.
 
 ### ADIM 4 — Sonuçları okuyun (sağ panel)
 
-| Bölüm | İçerik |
+Sağ panel üç ölçüm + bir durum satırından oluşur:
+
+| Bölüm | Cevapladığı soru |
 |---|---|
-| **Görüş Alanı (FOV)** | Yatay / dikey / köşegen FOV + sensör boyutu |
-| **Anlık Görüş Alanı (IFOV)** | µrad/px ve arcsec/px cinsinden |
-| **Eğiklik (Tilt)** | Düzlem-içi dönme, düzlem-dışı tilt, keystone |
-| **Yıldız Elipsi** | Ölçümün ham verisi + tespit güveni |
-| **Eşleme Kalitesi** | Ayna durumu, inlier sayısı, hizalama hatası |
+| **Görüş Alanı (FOV)** | Sensör ne kadar geniş bir alan görüyor? |
+| **Piksel Açısı (IFOV)** | Tek bir piksel ne kadar açı görüyor? |
+| **Eğiklik (Tilt)** | Görüntüde ne kadar eğiklik var? |
+| **Durum** | Bu sonuca güvenebilir miyim? |
 
 **Renk kodu:** 🟢 yeşil = iyi · 🟡 sarı = dikkat · 🔴 kırmızı = sorunlu
 
 ---
 
-## 5. SONUÇLARI YORUMLAMA
+## 5. SAĞ PANELDEKİ HER SATIR NE ANLATIYOR?
+
+![Sonuç paneli](gorseller/sonuc_paneli.png)
+
+### Görüş Alanı (FOV)
+
+Sensörün gördüğü **toplam açı**. Bu değerler görüntüden bağımsızdır —
+yalnızca girdiğiniz lens ve dedektör parametrelerinden hesaplanır. Aynı
+donanımla her analizde aynı çıkarlar.
+
+| Satır | Anlamı |
+|---|---|
+| **Yatay × Dikey** | Sensörün yatay ve dikey yönde gördüğü açı. Kare sensörde ikisi eşittir. |
+| **Köşegen** | Köşeden köşeye görüş açısı. Yatay/dikeyden büyüktür. |
+
+> **Örnek:** 9.200° × 9.200° — sistem 9.2 derecelik kare bir alan görüyor.
+> Köşegen 12.983°.
+
+### Piksel Açısı (IFOV)
+
+**Tek bir pikselin** gördüğü açı. Sistemin ayırt etme gücünü verir: iki
+nesne bu açıdan daha yakınsa aynı piksele düşer ve birbirinden ayırt
+edilemez.
+
+| Satır | Anlamı |
+|---|---|
+| **Bir piksel** (µrad) | Piksel açısı, mikroradyan cinsinden |
+| (arcsec) | Aynı değerin yay-saniyesi cinsinden yazımı |
+
+İki satır **aynı büyüklüğün** iki farklı birimidir; hangisi işinize
+geliyorsa onu kullanın. Piksel kare değilse (pitch X ≠ Y) ilk satır
+`78.57 × 80.12` gibi iki değer gösterir.
+
+> **Dikkat:** IFOV çözünürlükten **bağımsızdır**. Sensörü 2048'den 1024
+> piksele düşürürseniz FOV yarıya iner ama IFOV değişmez — tek pikselin
+> açısı, kaç piksel olduğuyla ilgili değildir.
+
+### Eğiklik (Tilt)
+
+| Satır | Anlamı |
+|---|---|
+| **Dönme** | Görüntünün kendi düzleminde saat yönünde dönmesi. Kamerayı hafifçe yamuk tutmak gibi — perspektif bozulması yaratmaz. |
+| **Eğiklik** | Dedektör düzleminin hedefe göre eğikliği. Asıl aradığınız tilt budur. |
+
+Eğiklik satırının altında küçük puntoyla **belirsizlik** yazar. İki
+biçimden biri görünür:
+
+- **`1.830°`** ve altında `belirsizlik ± 0.35°` →
+  ölçüm başarılı, değer güvenilir.
+- **`< 3.6°`** ve altında *"ölçüm sınırının altında"* →
+  eğiklik var olabilir ama bu yöntemle **ayırt edilemiyor**.
+
+> **Bu ayrım kritiktir.** `< 3.6°` yazması "tilt sıfır" demek DEĞİLDİR;
+> "tilt bu değerden küçük, tam sayısı ölçülemiyor" demektir. Yöntem küçük
+> açılarda doğası gereği duyarsızdır (bkz. Teknik Ek).
+
+### Durum
+
+Tek satırda **"bu sonuca güvenebilir miyim"** sorusunun cevabı:
+
+| Gösterge | Anlamı | Ne yapmalı |
+|---|---|---|
+| 🟢 **✓ Ölçüm güvenilir** | Desen net bulundu, hizalama sağlam | Sonucu kullanabilirsiniz |
+| 🟡 **⚠ Dikkat** | Ölçüm yapıldı ama bir zayıflık var | Sebebi okuyun, overlay'e bakın |
+| 🔴 **⛔ Sonuca güvenmeyin** | Desen seçilemedi | Görüntü kalitesini düzeltin, tekrar çekin |
+
+**▸ Ayrıntılar** satırına tıklarsanız teknik veriler açılır. Normal
+kullanımda bunlara bakmanız gerekmez; sorun teşhisi için dururlar:
+
+| Satır | Anlamı |
+|---|---|
+| **Sensör** | Sensörün fiziksel boyutu (mm). Parametreleri doğru girdiğinizi teyit eder. |
+| **Tilt yöntemi** | Eğikliği hangi yöntemin ölçtüğü. `circle_ellipse` = dairesel desenden (güvenilir). |
+| **Desen tespit güveni** | Yıldızın ne kadar net bulunduğu. 0.7 üstü iyidir. |
+| **Ayna (flip)** | Görüntü aynalanmış mı. **EVET normaldir** — optik düzenekten gelir, yazılım telafi eder. |
+| **Eşleşen nokta** | İki görüntü arasında kaç ortak nokta bulundu. Yüksek = iyi. |
+| **Hizalama hatası** | Görüntülerin üst üste oturma hatası (piksel). 2 px altı iyidir. |
+
+---
+
+## 6. SONUÇLARI YORUMLAMA
 
 ### Örnek çıktı (doğrulanmış referans değerler)
 
@@ -147,38 +230,62 @@ Sol panelin altındaki mavi **ANALİZ ET** butonuna basın.
 |---|---|
 | FOV | 9.200° × 9.200° (köşegen 12.983°) |
 | IFOV | 78.57 µrad/px (16.207 arcsec/px) |
-| Düzlem-içi dönme | +1.583° |
-| Düzlem-dışı tilt | 0.000° |
-| Ayna (flip) | EVET (yatay) |
-| Eşleme | 86 inlier, 1.40 px |
-| Elips güveni | 0.95 |
+| Dönme | +1.583° |
+| Eğiklik | < 3.6° (ölçüm sınırının altında) |
+| Durum | ✓ Ölçüm güvenilir |
 
-### ⚠️ ÖNEMLİ: Hangi tilt değerine güvenmeli?
+### ⚠️ ÖNEMLİ: "< 3.6°" ne demek, "0°" neden yazmıyor?
 
-Tilt bölümünde **iki farklı satır** vardır ve güvenilirlikleri farklıdır:
+Eğiklik satırında bazen kesin bir sayı yerine **üst sınır** görürsünüz.
+Bunun sebebi yöntemin fiziğidir.
 
-| Satır | Güvenilirlik | Neden |
+Eğiklik, merkezi yıldızın elips oranından ölçülür:
+
+```
+eksen oranı (b/a) = cos(eğiklik)
+```
+
+Kosinüs sıfır civarında **çok yassıdır**. 1° eğiklik oranı yalnızca 0.00015
+değiştirir — bu, ölçüm gürültüsünün altında kalır. Yani küçük açılarda
+oran ile açı arasındaki bağ kopar.
+
+| Gerçek eğiklik | Eksen oranı | Ölçülebilir mi? |
 |---|---|---|
-| **Düzlem-dışı tilt** | ✅ **ASIL DEĞER** | Yıldız elipsinden ölçülür; görüntülerin çözünürlük ve kadraj farkından **bağımsızdır** |
-| **Keystone X / Y** | ⚠️ İkincil | Homografiden gelir; ölçek/kırpma farkına **duyarlıdır**. Yön fikri verir, mutlak değeri için elips satırına bakın |
+| 0° | 1.0000 | — |
+| 1° | 0.9998 | ❌ gürültüde kaybolur |
+| 3° | 0.9986 | ⚠️ sınırda |
+| 5° | 0.9962 | ✅ evet |
+| 20° | 0.9397 | ✅ rahatlıkla |
 
-**Neden bu ayrım var?** Ground truth görüntüsü OLED'e kırpılarak basıldığı için
-GT ve dedektör görüntüleri farklı çözünürlük ve farklı kadrajdadır. Homografi
-tabanlı ölçüm bu farktan etkilenir; elips yöntemi etkilenmez.
+Bu yüzden yazılım küçük açılarda **"< 3.6°"** yazar. Eskiden bu durumda
+`0.000°` yazıyordu ve bu yanıltıcıydı: ölçülememiş bir değer, kesin bir
+sıfır gibi görünüyordu.
 
-### Diğer değerlerin anlamı
+> **Özet:** `< 3.6°` = "eğiklik bu değerden küçük, tam sayısı bu yöntemle
+> çıkarılamıyor." Sıfır olduğunu **kanıtlamaz**.
 
-- **Ayna (flip) = EVET** → Dedektör görüntüsü aynalanmış. Bu **normaldir**,
-  optik düzenekten kaynaklanır; yazılım otomatik telafi eder.
-- **Inlier sayısı** → Kaç ortak nokta güvenilir şekilde eşleşti. Yüksek = iyi.
-- **Yeniden izdüşüm** → Hizalama hatası (piksel). 2 px altı iyidir.
-- **Tespit güveni** → Yıldız elipsinin ne kadar net bulunduğu. 0.7 üstü iyidir.
+Küçük eğiklikleri hassas ölçmeniz gerekiyorsa mevcut yöntem yetersizdir;
+farklı bir referans geometri (bilinen ızgara/işaret deseni) gerekir.
+
+### Dönme ile eğiklik farkı
+
+Bu ikisi **farklı** büyüklüklerdir, karıştırmayın:
+
+| | Ne olur | Nasıl ölçülür |
+|---|---|---|
+| **Dönme** | Görüntü kendi düzleminde döner; daire daire kalır | SIFT eşleşmelerinden homografi |
+| **Eğiklik** | Düzlem hedefe göre eğilir; daire elipse döner | Yıldız elipsinin eksen oranı |
+
+Kamerayı yamuk tutmak dönme yaratır. Kamerayı hedefe eğik tutmak eğiklik
+yaratır. Biri diğerinden bağımsız olarak var olabilir.
 
 ---
 
-## 6. SAĞLIK KONTROLÜ — SONUCA GÜVENEBİLİR MİYİM?
+## 7. SAĞLIK KONTROLÜ — SONUCA GÜVENEBİLİR MİYİM?
 
-Her analizden sonra bu üç kontrolü yapın:
+İlk bakılacak yer **Durum** satırıdır; yazılım kontrolü sizin yerinize
+yapar. 🟢 yeşil görüyorsanız aşağıdaki kontroller zaten geçmiş demektir.
+Sarı veya kırmızı görüyorsanız sebebini bu üç kontrolle bulun:
 
 ### Kontrol 1 — Overlay sekmesine bakın
 
@@ -203,12 +310,13 @@ Elips çok büyük (tüm chart'ı kapsıyor) veya çok küçükse tespit başar�
 
 ### Kontrol 3 — Güven skorunu okuyun
 
-**Tespit güveni < 0.7** ise merkezi yıldız net seçilememiştir. Görüntüde
-yıldızın tam görünür ve odakta olduğundan emin olun.
+**▸ Ayrıntılar**'ı açıp **Desen tespit güveni** satırına bakın. **0.7'nin
+altındaysa** merkezi yıldız net seçilememiştir. Görüntüde yıldızın tam
+görünür ve odakta olduğundan emin olun.
 
 ---
 
-## 7. PARAMETRELERİ DEĞİŞTİRME VE PRESET'LER
+## 8. PARAMETRELERİ DEĞİŞTİRME VE PRESET'LER
 
 ### Donanım değişirse
 
@@ -237,7 +345,7 @@ kaydedin.
 
 ---
 
-## 8. TESTLER
+## 9. TESTLER
 
 ### Sentetik doğrulama (görüntü gerekmez)
 
@@ -252,6 +360,20 @@ verip vermediğini kontrol eder.
 eksen oranı tam 1.0000 (sıfır sistematik sapma).
 
 Ölçümden şüphelenirseniz ilk çalıştıracağınız test budur.
+
+### Ölçüm katmanı doğrulaması
+
+```bash
+python3 test_tilt_multi.py
+```
+
+Çoklu tilt ölçüm katmanını sınar. İki şeyi birden kontrol eder:
+
+1. **Doğruluk** — bilinen açılar geri okunabiliyor mu
+2. **Dürüstlük** — ölçülemeyen durumlarda sayı **uydurulmuyor** mu
+
+İkincisi en az birincisi kadar önemlidir: desensiz bir görüntü verildiğinde
+sistem "ölçülemedi" demeli, sıfır üretmemelidir.
 
 ### Uçtan uca test (örnek görüntülerle)
 
@@ -272,15 +394,17 @@ Sadece FOV/IFOV matematiğini ve görüntü eşlemeyi sınar.
 
 ---
 
-## 9. SORUN GİDERME
+## 10. SORUN GİDERME
 
 | Belirti | Olası sebep | Çözüm |
 |---|---|---|
 | "Görüntü eksik" uyarısı | GT veya dedektör seçilmemiş | Her iki görüntüyü de seçin |
-| "Merkezi Siemens star tespit edilemedi" | Yıldız kadrajda değil / odak dışı | Yıldızın tam görünür olduğu bir görüntü kullanın |
-| "Görüntüler eşleştirilemedi" | Görüntüler çok farklı / az örtüşüyor | Aynı desenin çekimleri olduğundan emin olun. Tilt yine de elipsten ölçülür |
-| Overlay'de kırmızı/yeşil ayrışmış | Hizalama tutmamış | Tilt değerine güvenmeyin; görüntü kalitesini artırın |
-| Tespit güveni düşük (< 0.7) | Yıldız net değil | Odak / aydınlatma / kontrast iyileştirin |
+| Eğiklik satırında **"ölçülemedi"** | Görüntüde dairesel desen yok | Merkezi yıldızın göründüğü bir görüntü kullanın |
+| Eğiklik **"< 3.6°"** yazıyor | Eğiklik yöntemin çözünürlük sınırının altında | Normal davranış — bkz. bölüm 6 |
+| Durum **⛔ kırmızı** | Desen net seçilemedi | Odak / aydınlatma / kontrast iyileştirin |
+| Durum **⚠ sarı**, "az sayıda ortak nokta" | Görüntüler az örtüşüyor | Aynı desenin çekimleri olduğundan emin olun |
+| "Görüntüler eşleştirilemedi" | Görüntüler çok farklı | Dönme ölçülemez; eğiklik yine de elipsten ölçülür |
+| Overlay'de kırmızı/yeşil ayrışmış | Hizalama tutmamış | Sonuca güvenmeyin; görüntü kalitesini artırın |
 | Arayüz açılmıyor | PyQt5 sorunu | `python3 -c "import PyQt5; print('OK')"` ile kontrol edin |
 
 ### Ortam gereksinimleri
@@ -293,7 +417,7 @@ OpenCV 4.13 · NumPy 1.26 · SciPy 1.11 · PyQt5 5.15 · matplotlib 3.10
 
 ---
 
-## 10. TEKNİK EK — ÖLÇÜM NASIL YAPILIYOR?
+## 11. TEKNİK EK — ÖLÇÜM NASIL YAPILIYOR?
 
 ### FOV / IFOV — pinhole modeli
 
@@ -328,6 +452,38 @@ merkezi yıldızın **içindeki** her yarıçap halkasında, açısal yönde ço
 siyah-beyaz geçiş vardır (~110). Yıldız bitince bu sayı keskin düşer. Profildeki
 **ilk kalıcı düşüş** yıldızın sınırıdır.
 
+#### Yöntemin çözünürlük sınırı — neden küçük açılar ölçülemez
+
+Eksen oranından açıya geçerken türev şudur:
+
+```
+tilt = arccos(r)   →   d(tilt)/dr = -1 / √(1 - r²)
+```
+
+`r → 1` (küçük tilt) iken bu ifade **patlar**: aynı miktar oran gürültüsü,
+çok daha büyük bir açı belirsizliğine karşılık gelir. Tersi de doğrudur —
+küçük açılarda oran neredeyse hiç değişmez, dolayısıyla açı oranın içinde
+kaybolur.
+
+Tipik oran ölçüm gürültüsü σ ≈ 0.002'dir. Bunun gizleyebileceği en büyük
+açı:
+
+```
+arccos(1 - 0.002) ≈ 3.6°
+```
+
+Bu, yöntemin **fiziksel çözünürlük sınırıdır**. Yazılım bu sınırın altındaki
+ölçümleri sayı olarak değil, üst sınır olarak (`< 3.6°`) raporlar.
+
+**Ölçüm katmanı** (`core/tilt_estimators.py`) bunu şöyle yönetir:
+
+- Her yöntem kendi **belirsizliğini** (σ) hesaplar
+- Ölçüm σ'dan büyükse "çözülebilir", değilse üst sınır olarak sunulur
+- Eksen oranı 1.0'ı aşarsa (fiziksel olarak imkânsız) `clamped` işaretlenir
+- Desen tespit güveni 0.7'nin altındaysa ölçüm **üretilmez** — olmayan
+  desenden sayı uydurulmaz
+- Doğrulanmamış yöntemler (`experimental`) birincil ölçüm olarak seçilmez
+
 ### Dönme — homografi
 
 Düzlem-içi dönme, SIFT özellik eşleşmelerinden hesaplanan homografinin
@@ -351,21 +507,24 @@ optik_analiz/
 │   ├── optics.py          FOV/IFOV hesabı + homografi ayrıştırma
 │   ├── image_analysis.py  SIFT eşleme, ayna tespiti, dejenerelik denetimi
 │   ├── siemens_star.py    Elips-fit tilt ölçümü
+│   ├── tilt_estimators.py Çoklu tilt yöntemi + belirsizlik raporlama
 │   └── pipeline.py        Tüm akışı birleştiren giriş noktası
 ├── gui/
 │   ├── main_window.py     Ana pencere (3 panel + arka plan thread)
 │   └── widgets.py         Tema, görüntü göstericisi, sonuç satırları
+├── docs/                  Bu kılavuz (md/html/pdf) + görseller
 ├── presets/               Preset JSON'ları
 ├── data/                  Debug/önizleme çıktıları
 ├── run_gui.py             ← Arayüzü başlatır
 ├── test_core.py           Çekirdek test
 ├── test_pipeline.py       Uçtan uca test
 ├── test_tilt_synth.py     Sentetik doğrulama
+├── test_tilt_multi.py     Ölçüm katmanı doğrulaması
 └── DEVAM_YONERGESI.md     Geliştirme durumu ve teknik notlar
 ```
 
 ---
 
-*Bu kılavuz `/home/test123/Desktop/Optik_Analiz_Dokumantasyon/` altındadır.
-Geliştirme durumu ve teknik detaylar için projedeki `DEVAM_YONERGESI.md`
+*Bu kılavuz projedeki `docs/` klasörü altındadır.
+Geliştirme durumu ve teknik detaylar için `DEVAM_YONERGESI.md`
 dosyasına bakınız.*

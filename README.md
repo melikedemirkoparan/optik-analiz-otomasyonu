@@ -41,11 +41,15 @@ Sonuçlar sağ panelde görünür.
 
 ```bash
 python3 test_tilt_synth.py   # Sentetik doğrulama (görüntü gerekmez)
+python3 test_tilt_multi.py   # Ölçüm katmanı: doğruluk + dürüstlük
 python3 test_pipeline.py     # Uçtan uca test (örnek görüntülerle)
 python3 test_core.py         # Çekirdek FOV/IFOV matematiği
 ```
 
 Sentetik doğrulamada 0°–40° arasında en büyük hata 0.29°.
+
+`test_tilt_multi.py` ayrıca **dürüstlüğü** sınar: desensiz bir görüntü
+verildiğinde sistem "ölçülemedi" demeli, sıfır üretmemelidir.
 
 ## Ölçüm yöntemi
 
@@ -66,18 +70,45 @@ eksen oranı (b/a) = cos(tilt) → tilt = arccos(b/a)
 Bu ilişki ölçek ve kırpmadan bağımsızdır. Düzlem-içi dönme ise SIFT
 eşleşmelerinden gelen homografinin QR ayrıştırmasıyla bulunur.
 
-> **Önemli:** Tilt için asıl güvenilecek değer **"Düzlem-dışı tilt"** satırıdır.
-> "Keystone X/Y" ikincildir — homografiden geldiği için ölçek/kadraj farkına
-> duyarlıdır.
+### Ölçüm sınırı
+
+Kosinüs sıfır civarında yassı olduğu için elips yöntemi küçük açılara
+duyarsızdır: 1° eğiklik eksen oranını yalnızca 0.00015 değiştirir. Tipik
+oran gürültüsü (σ ≈ 0.002) bunun karşılığı olan **~3.6°**'ye kadar olan
+eğiklikleri gizler.
+
+Bu yüzden yazılım küçük açılarda kesin bir sayı yerine üst sınır raporlar:
+
+```
+Eğiklik    < 3.6°
+           ölçüm sınırının altında — ayırt edilemiyor
+```
+
+> `< 3.6°`, "tilt sıfır" demek **değildir**; "tilt bu değerden küçük, tam
+> sayısı bu yöntemle çıkarılamıyor" demektir.
+
+Ölçüm katmanı (`core/tilt_estimators.py`) her yöntemin belirsizliğini
+hesaplar, desen tespit güveni 0.7'nin altındaysa ölçüm üretmez ve
+doğrulanmamış yöntemleri birincil olarak seçmez — olmayan desenden sayı
+uydurulmaz.
 
 ## Sonuca güvenilir mi?
 
-Her analizden sonra üç kontrol:
+Sağ paneldeki **Durum** satırı bu soruyu tek satırda cevaplar:
+
+| Gösterge | Anlamı |
+|---|---|
+| 🟢 Ölçüm güvenilir | Desen net bulundu, hizalama sağlam |
+| 🟡 Dikkat | Ölçüm yapıldı ama bir zayıflık var |
+| 🔴 Sonuca güvenmeyin | Desen seçilemedi |
+
+Sarı/kırmızı durumda üç kontrol:
 
 1. **Overlay sekmesi** — geniş sarı alanlar iyi hizalama demektir. Kırmızı/yeşil
    ayrışmışsa tilt değerine güvenmeyin.
 2. **Elipsin yeri** — yeşil elips merkezi yıldızın dış sınırına oturmalıdır.
-3. **Tespit güveni** — 0.7 altındaysa yıldız net seçilememiştir.
+3. **Tespit güveni** — `▸ Ayrıntılar` altında; 0.7 altındaysa yıldız net
+   seçilememiştir.
 
 ## Dokümantasyon
 
@@ -98,6 +129,7 @@ optik_analiz/
 │   ├── optics.py          FOV/IFOV hesabı + homografi ayrıştırma
 │   ├── image_analysis.py  SIFT eşleme, ayna tespiti, dejenerelik denetimi
 │   ├── siemens_star.py    Elips-fit tilt ölçümü
+│   ├── tilt_estimators.py Çoklu tilt yöntemi + belirsizlik raporlama
 │   └── pipeline.py        Tüm akışı birleştiren giriş noktası
 ├── gui/
 │   ├── main_window.py     Ana pencere (3 panel + arka plan thread)

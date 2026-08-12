@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 
 from .config import SystemConfig
-from . import optics, image_analysis, siemens_star
+from . import optics, image_analysis, siemens_star, tilt_estimators
 
 
 @dataclass
@@ -33,6 +33,9 @@ class AnalysisResult:
 
     # Siemens star tabanlı tilt (asıl güvenilen kaynak)
     star: siemens_star.StarTiltResult | None = None
+
+    # Çoklu yöntem tilt raporu (belirsizlik + yöntem seçimi)
+    tilt: tilt_estimators.TiltReport | None = None
 
     # Önizleme görüntüleri (BGR, GUI için hazır)
     gt_preview: np.ndarray | None = None
@@ -59,12 +62,41 @@ class AnalysisResult:
 
     @property
     def tilt_deg(self) -> float:
-        """Düzlem-dışı tilt — elips yönteminden (ölçek/crop'tan bağımsız)."""
+        """
+        Düzlem-dışı tilt. Çoklu yöntem raporundan gelir (bkz. tilt_estimators);
+        rapor yoksa eski davranışa düşer.
+
+        DİKKAT: Bu sayı tek başına yeterli değildir — `tilt_sigma_deg` ve
+        `tilt_resolvable` ile birlikte okunmalıdır. Değer gürültü sınırının
+        altındaysa "tilt yok" değil "ayırt edilemiyor" demektir.
+        """
+        if self.tilt is not None and self.tilt.ok:
+            return self.tilt.tilt_deg
         if self.star is not None and self.star.ok:
             return self.star.tilt_deg
         if self.match is not None and self.match.tilt is not None:
             return self.match.tilt.total_tilt_deg
         return float("nan")
+
+    @property
+    def tilt_sigma_deg(self) -> float:
+        """Düzlem-dışı tilt ölçümünün 1-sigma belirsizliği (derece)."""
+        return self.tilt.sigma_deg if self.tilt is not None else float("inf")
+
+    @property
+    def tilt_resolvable(self) -> bool:
+        """Ölçüm kendi gürültüsünden ayırt edilebiliyor mu."""
+        return bool(self.tilt.resolvable) if self.tilt is not None else False
+
+    @property
+    def tilt_method(self) -> str:
+        """Tilt'i hangi yöntemin verdiği ("circle_ellipse", "grid_vanishing"...)."""
+        return self.tilt.primary_method if self.tilt is not None else ""
+
+    @property
+    def tilt_summary(self) -> str:
+        """Arayüzde gösterilecek dürüst özet: "1.83° ± 0.20°" ya da "< 3.6°"."""
+        return self.tilt.summary() if self.tilt is not None else "ölçülemedi"
 
     @property
     def mirrored(self) -> bool:
@@ -134,6 +166,18 @@ def run_analysis(gt_path: str, det_path: str, cfg: SystemConfig,
                 "radyal desen net görünmüyor olabilir.")
     except Exception as e:                              # noqa: BLE001
         res.messages.append(f"Elips tespit hatası: {e}")
+
+    # --- 5b. Çoklu yöntem tilt ölçümü ---
+    # Yıldız kadrajda olmasa bile tilt üretilebilsin ve her durumda
+    # belirsizlik raporlansın diye ayrı bir katman.
+    report(78, "Tilt yöntemleri değerlendiriliyor…")
+    try:
+        h_tilt = res.match.tilt if res.match is not None else None
+        res.tilt = tilt_estimators.measure_tilt(gt_gray, det_gray, cfg,
+                                                homography_tilt=h_tilt)
+        res.messages.extend(res.tilt.messages)
+    except Exception as e:                                  # noqa: BLE001
+        res.messages.append(f"Tilt ölçüm katmanı hatası: {e}")
 
     # --- 6. Önizlemeler ---
     report(85, "Önizlemeler hazırlanıyor…")

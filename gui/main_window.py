@@ -307,63 +307,92 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(2, 2, 2, 2)
         lay.setSpacing(10)
 
-        # FOV
+        # ------------------------------------------------------------------
+        # Panel, kullanıcının sorduğu ÜÇ soruya göre düzenlenmiştir:
+        #   1. Sensör ne kadar geniş görüyor?      -> FOV
+        #   2. Tek piksel ne kadar açı görüyor?    -> IFOV (açısal FOV)
+        #   3. Görüntüde ne kadar eğiklik var?     -> Tilt
+        # Ara veriler (eksen oranı, inlier, yeniden izdüşüm, keystone) bu
+        # soruların cevabı değil, cevabın türetildiği ham veridir; kullanıcı
+        # onlarla karar vermez. Bu yüzden "Ayrıntılar" katlanır bölümüne
+        # alındı — sorun teşhisi için duruyorlar ama ekranı meşgul etmiyorlar.
+        # ------------------------------------------------------------------
+
+        # 1) FOV
         gb_fov = QGroupBox("Görüş Alanı (FOV)")
         fl = QVBoxLayout(gb_fov)
-        self.r_fov_x = ResultRow("Yatay FOV", "°")
-        self.r_fov_y = ResultRow("Dikey FOV", "°")
-        self.r_fov_d = ResultRow("Köşegen FOV", "°")
-        for r in (self.r_fov_x, self.r_fov_y, self.r_fov_d):
+        self.r_fov_xy = ResultRow("Yatay × Dikey", "°",
+                                  "Sensörün gördüğü toplam açı.")
+        self.r_fov_d = ResultRow("Köşegen", "°")
+        for r in (self.r_fov_xy, self.r_fov_d):
             fl.addWidget(r)
-        fl.addWidget(hline())
-        self.r_sensor = ResultRow("Sensör", "mm")
-        fl.addWidget(self.r_sensor)
         lay.addWidget(gb_fov)
 
-        # IFOV
-        gb_ifov = QGroupBox("Anlık Görüş Alanı (IFOV)")
+        # 2) IFOV — "açısal FOV", tek pikselin gördüğü açı
+        gb_ifov = QGroupBox("Piksel Açısı (IFOV)")
         il = QVBoxLayout(gb_ifov)
-        self.r_ifov_x = ResultRow("IFOV yatay", "µrad/px",
-                                  "Bir pikselin gördüğü açı.")
-        self.r_ifov_y = ResultRow("IFOV dikey", "µrad/px")
-        self.r_ifov_as = ResultRow("IFOV", "arcsec/px")
-        for r in (self.r_ifov_x, self.r_ifov_y, self.r_ifov_as):
+        self.r_ifov = ResultRow("Bir piksel", "µrad",
+                                "Tek bir pikselin gördüğü açı — sistemin "
+                                "ayırt etme gücü.")
+        self.r_ifov_as = ResultRow("", "arcsec")
+        for r in (self.r_ifov, self.r_ifov_as):
             il.addWidget(r)
         lay.addWidget(gb_ifov)
 
-        # Tilt
+        # 3) Tilt
         gb_tilt = QGroupBox("Eğiklik (Tilt)")
         tl = QVBoxLayout(gb_tilt)
-        self.r_rot = ResultRow("Düzlem-içi dönme", "°",
-                               "Görüntünün kendi düzleminde saat yönü dönmesi.")
-        self.r_tilt = ResultRow("Düzlem-dışı tilt", "°",
-                                "Yıldız elipsinden ölçülür — ölçek ve "
-                                "kırpmadan bağımsızdır.")
-        self.r_tilt_x = ResultRow("Keystone X", "°")
-        self.r_tilt_y = ResultRow("Keystone Y", "°")
-        for r in (self.r_rot, self.r_tilt, self.r_tilt_x, self.r_tilt_y):
+        self.r_rot = ResultRow("Dönme", "°",
+                               "Görüntünün kendi düzleminde saat yönü dönmesi. "
+                               "Perspektif bozulması yaratmaz.")
+        self.r_tilt = ResultRow("Eğiklik", "°",
+                                "Dedektör düzleminin hedefe göre eğikliği.")
+        for r in (self.r_rot, self.r_tilt):
             tl.addWidget(r)
+        # Ölçüm belirsizliği / sınır durumu için açıklama satırı
+        self.lbl_tilt_note = QLabel("")
+        self.lbl_tilt_note.setWordWrap(True)
+        self.lbl_tilt_note.setStyleSheet(f"color:{MUTED}; font-size:11px;")
+        tl.addWidget(self.lbl_tilt_note)
         lay.addWidget(gb_tilt)
 
-        # Elips ölçümü
-        gb_el = QGroupBox("Yıldız Elipsi")
-        el = QVBoxLayout(gb_el)
-        self.r_gt_ratio = ResultRow("GT eksen oranı", "")
-        self.r_det_ratio = ResultRow("Dedektör eksen oranı", "")
-        self.r_el_conf = ResultRow("Tespit güveni", "")
-        for r in (self.r_gt_ratio, self.r_det_ratio, self.r_el_conf):
-            el.addWidget(r)
-        lay.addWidget(gb_el)
+        # 4) Tek satır durum — sonuca güvenilir mi
+        gb_st = QGroupBox("Durum")
+        sl = QVBoxLayout(gb_st)
+        self.lbl_verdict = QLabel("—")
+        self.lbl_verdict.setWordWrap(True)
+        self.lbl_verdict.setStyleSheet(f"color:{MUTED}; font-size:13px;")
+        sl.addWidget(self.lbl_verdict)
 
-        # Eşleme kalitesi
-        gb_m = QGroupBox("Eşleme Kalitesi")
-        ml = QVBoxLayout(gb_m)
+        self.btn_details = QPushButton("▸ Ayrıntılar")
+        self.btn_details.setCheckable(True)
+        self.btn_details.setStyleSheet(
+            f"QPushButton{{border:none; color:{MUTED}; text-align:left; "
+            f"padding:2px; font-size:11px;}}")
+        self.btn_details.toggled.connect(self._toggle_details)
+        sl.addWidget(self.btn_details)
+
+        # Katlanan teknik ayrıntılar
+        self.details_box = QWidget()
+        # Gizliyken yer kaplamasın (aksi halde Durum kutusu boş boşluk bırakır)
+        sp = self.details_box.sizePolicy()
+        sp.setRetainSizeWhenHidden(False)
+        self.details_box.setSizePolicy(sp)
+        dl = QVBoxLayout(self.details_box)
+        dl.setContentsMargins(0, 4, 0, 0)
+        dl.setSpacing(2)
+        self.r_sensor = ResultRow("Sensör", "mm")
+        self.r_tilt_method = ResultRow("Tilt yöntemi", "")
+        self.r_el_conf = ResultRow("Desen tespit güveni", "")
         self.r_mirror = ResultRow("Ayna (flip)", "")
-        self.r_inliers = ResultRow("Inlier sayısı", "")
-        self.r_reproj = ResultRow("Yeniden izdüşüm", "px")
-        for r in (self.r_mirror, self.r_inliers, self.r_reproj):
-            ml.addWidget(r)
-        lay.addWidget(gb_m)
+        self.r_inliers = ResultRow("Eşleşen nokta", "")
+        self.r_reproj = ResultRow("Hizalama hatası", "px")
+        for r in (self.r_sensor, self.r_tilt_method, self.r_el_conf,
+                  self.r_mirror, self.r_inliers, self.r_reproj):
+            dl.addWidget(r)
+        self.details_box.setVisible(False)
+        sl.addWidget(self.details_box)
+        lay.addWidget(gb_st)
 
         # Uyarılar
         self.msg_label = QLabel("")
@@ -377,6 +406,11 @@ class MainWindow(QMainWindow):
         return scroll
 
     # --------------------------- yardımcılar -------------------------------
+
+    def _toggle_details(self, checked: bool):
+        """'Ayrıntılar' bölümünü açar/kapatır."""
+        self.details_box.setVisible(checked)
+        self.btn_details.setText("▾ Ayrıntılar" if checked else "▸ Ayrıntılar")
 
     def _dspin(self, lo, hi, dec, suffix) -> QDoubleSpinBox:
         s = QDoubleSpinBox()
@@ -561,50 +595,47 @@ class MainWindow(QMainWindow):
     # ---------------------------- sonuç gösterimi --------------------------
 
     def _clear_results(self):
-        for r in (self.r_fov_x, self.r_fov_y, self.r_fov_d, self.r_sensor,
-                  self.r_ifov_x, self.r_ifov_y, self.r_ifov_as,
-                  self.r_rot, self.r_tilt, self.r_tilt_x, self.r_tilt_y,
-                  self.r_gt_ratio, self.r_det_ratio, self.r_el_conf,
+        for r in (self.r_fov_xy, self.r_fov_d,
+                  self.r_ifov, self.r_ifov_as,
+                  self.r_rot, self.r_tilt,
+                  self.r_sensor, self.r_tilt_method, self.r_el_conf,
                   self.r_mirror, self.r_inliers, self.r_reproj):
             r.clear()
+        self.lbl_tilt_note.setText("")
+        self.lbl_verdict.setText("—")
+        self.lbl_verdict.setStyleSheet(f"color:{MUTED}; font-size:13px;")
 
     def _show_results(self, res):
-        # FOV / IFOV
+        # ---- 1) FOV — sensörün gördüğü toplam açı ----
         if res.fov is not None:
             f = res.fov
-            self.r_fov_x.set_value(f"{f.fov_x_deg:.3f}")
-            self.r_fov_y.set_value(f"{f.fov_y_deg:.3f}")
+            self.r_fov_xy.set_value(f"{f.fov_x_deg:.3f} × {f.fov_y_deg:.3f}")
             self.r_fov_d.set_value(f"{f.fov_diag_deg:.3f}")
             self.r_sensor.set_value(f"{f.sensor_w_mm:.2f} × {f.sensor_h_mm:.2f}")
-            self.r_ifov_x.set_value(f"{f.ifov_x_urad:.2f}")
-            self.r_ifov_y.set_value(f"{f.ifov_y_urad:.2f}")
+
+            # ---- 2) IFOV — tek pikselin gördüğü açı ----
+            # Piksel kare değilse iki eksen ayrı gösterilir.
+            if abs(f.ifov_x_urad - f.ifov_y_urad) < 0.01:
+                self.r_ifov.set_value(f"{f.ifov_x_urad:.2f}")
+            else:
+                self.r_ifov.set_value(
+                    f"{f.ifov_x_urad:.2f} × {f.ifov_y_urad:.2f}")
             self.r_ifov_as.set_value(f"{f.ifov_x_arcsec:.3f}")
 
-        # Tilt
+        # ---- 3) Tilt ----
         rot = res.rotation_deg
         if rot == rot:                      # NaN değilse
             self.r_rot.set_value(f"{rot:+.3f}")
-        tilt = res.tilt_deg
-        if tilt == tilt:
-            # Küçük tilt iyi, büyük tilt dikkat çekmeli
-            color = GOOD if tilt < 1.0 else (WARN if tilt < 5.0 else BAD)
-            self.r_tilt.set_value(f"{tilt:.3f}", color)
 
-        if res.match is not None and res.match.tilt is not None:
-            t = res.match.tilt
-            self.r_tilt_x.set_value(f"{t.tilt_x_deg:+.3f}")
-            self.r_tilt_y.set_value(f"{t.tilt_y_deg:+.3f}")
+        self._show_tilt(res)
 
-        # Elips
+        # ---- Ayrıntılar (katlanır) ----
         if res.star is not None and res.star.ok:
             g, d = res.star.gt_ellipse, res.star.det_ellipse
-            self.r_gt_ratio.set_value(f"{g.axis_ratio:.4f}")
-            self.r_det_ratio.set_value(f"{d.axis_ratio:.4f}")
             conf = min(g.confidence, d.confidence)
             ccol = GOOD if conf > 0.7 else (WARN if conf > 0.4 else BAD)
             self.r_el_conf.set_value(f"{conf:.2f}", ccol)
 
-        # Eşleme
         if res.match is not None:
             m = res.match
             self.r_mirror.set_value("EVET" if m.mirrored else "hayır",
@@ -614,6 +645,85 @@ class MainWindow(QMainWindow):
                 rcol = GOOD if m.reproj_error_px < 2.0 else WARN
                 self.r_reproj.set_value(f"{m.reproj_error_px:.2f}", rcol)
 
+        self._show_verdict(res)
+
+    def _show_tilt(self, res):
+        """
+        Tilt'i belirsizliğiyle birlikte gösterir.
+
+        Eski davranış küçük tilt'i "0.000°" diye kesin bir sayı gibi
+        gösteriyordu; oysa elips yöntemi ~3.6° altını çözemez ve o sıfır
+        "ölçemedim"in kılık değiştirmiş haliydi. Artık ölçüm gürültünün
+        altındaysa üst sınır olarak ("< 3.6°") gösterilir.
+        """
+        rep = getattr(res, "tilt", None)
+        tilt = res.tilt_deg
+
+        if rep is not None and rep.ok:
+            self.r_tilt_method.set_value(rep.primary_method or "—")
+            if not rep.resolvable:
+                # Ölçülemedi değil — "bu değerden küçük" bilgisi de sonuçtur.
+                self.r_tilt.set_value(f"< {rep.sigma_deg:.1f}", GOOD)
+                self.lbl_tilt_note.setText(
+                    "Eğiklik ölçüm sınırının altında — bu yöntemle ayırt "
+                    "edilemiyor, sıfır olduğu anlamına gelmez.")
+            else:
+                color = (GOOD if rep.tilt_deg < 1.0
+                         else (WARN if rep.tilt_deg < 5.0 else BAD))
+                self.r_tilt.set_value(f"{rep.tilt_deg:.3f}", color)
+                self.lbl_tilt_note.setText(f"belirsizlik ± {rep.sigma_deg:.2f}°")
+            return
+
+        # Rapor yoksa eski davranış
+        self.lbl_tilt_note.setText("")
+        if tilt == tilt:
+            color = GOOD if tilt < 1.0 else (WARN if tilt < 5.0 else BAD)
+            self.r_tilt.set_value(f"{tilt:.3f}", color)
+        else:
+            self.r_tilt.set_value("ölçülemedi", BAD)
+            self.lbl_tilt_note.setText(
+                "Görüntüde bilinen bir geometri (dairesel desen) "
+                "bulunamadı — eğiklik ölçülemez.")
+
+    def _show_verdict(self, res):
+        """
+        Tek satırda "bu sonuca güvenebilir miyim" cevabı.
+
+        Kullanıcı inlier sayısı veya yeniden izdüşüm hatasıyla karar vermez;
+        onun sorusu "sonuç sağlam mı". Bu satır o soruyu cevaplar, ham
+        sayılar ayrıntılarda kalır.
+        """
+        problems, warnings = [], []
+
+        if res.match is not None:
+            m = res.match
+            if m.homography is None:
+                warnings.append("görüntüler eşleştirilemedi")
+            elif m.num_inliers < 20:
+                warnings.append(f"az sayıda ortak nokta ({m.num_inliers})")
+            if m.reproj_error_px == m.reproj_error_px and m.reproj_error_px > 2.0:
+                warnings.append(f"hizalama hatası yüksek "
+                                f"({m.reproj_error_px:.1f} px)")
+
+        if res.star is not None and res.star.ok:
+            conf = min(res.star.gt_ellipse.confidence,
+                       res.star.det_ellipse.confidence)
+            if conf < 0.7:
+                problems.append(f"desen net seçilemedi (güven {conf:.2f})")
+        else:
+            warnings.append("dairesel desen bulunamadı")
+
+        if problems:
+            self.lbl_verdict.setText("⛔  Sonuca güvenmeyin — " +
+                                     "; ".join(problems))
+            self.lbl_verdict.setStyleSheet(f"color:{BAD}; font-size:13px;")
+        elif warnings:
+            self.lbl_verdict.setText("⚠  Dikkat — " + "; ".join(warnings))
+            self.lbl_verdict.setStyleSheet(f"color:{WARN}; font-size:13px;")
+        else:
+            self.lbl_verdict.setText("✓  Ölçüm güvenilir")
+            self.lbl_verdict.setStyleSheet(f"color:{GOOD}; font-size:13px;")
+
         # Görüntüler
         self.view_gt.set_image(res.gt_preview)
         self.view_det.set_image(res.det_preview)
@@ -621,9 +731,15 @@ class MainWindow(QMainWindow):
             self.view_overlay.set_image(res.overlay)
             self.tabs.setCurrentIndex(2)
 
-        # Mesajlar
-        if res.messages:
-            self.msg_label.setText("⚠ " + "\n⚠ ".join(res.messages))
+        # Mesajlar — tilt belirsizliği zaten Tilt bölümünde ve Durum
+        # satırında gösteriliyor; burada tekrar etmesin.
+        msgs = [m for m in res.messages
+                if "gürültüsünün altında" not in m
+                and not m.lstrip().startswith("·")]
+        if msgs:
+            self.msg_label.setText("⚠ " + "\n⚠ ".join(msgs))
+        else:
+            self.msg_label.setText("")
         self.status_label.setText("Analiz tamamlandı.")
 
 

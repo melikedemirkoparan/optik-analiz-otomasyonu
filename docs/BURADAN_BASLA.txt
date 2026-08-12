@@ -4,11 +4,12 @@ OPTİK ANALİZ — DOKÜMANTASYON
 Bu klasörde kullanım kılavuzunun üç biçimi var. Hangisini
 açacağınız size kalmış — içerikleri aynıdır:
 
-  KULLANIM_KILAVUZU.pdf    ← Yazdırmak/paylaşmak için (14 sayfa)
+  KULLANIM_KILAVUZU.pdf    ← Yazdırmak/paylaşmak için
   KULLANIM_KILAVUZU.html   ← Tarayıcıda okumak için (çift tıklayın)
   KULLANIM_KILAVUZU.md     ← VS Code'da düzenlemek için
 
   gorseller/               Kılavuzdaki ekran görüntüleri
+  build_docs.py            .md'yi HTML + PDF'e çevirir
 
 
 HIZLI BAŞLANGIÇ
@@ -34,20 +35,39 @@ HIZLI BAŞLANGIÇ
       ANALİZ ET  →  sonuçlar sağ panelde
 
 
+SAĞ PANEL — ÜÇ ÖLÇÜM + BİR DURUM
+────────────────────────────────────────────────────────
+
+  Görüş Alanı (FOV)     Sensör ne kadar geniş görüyor
+  Piksel Açısı (IFOV)   Tek piksel ne kadar açı görüyor
+  Eğiklik (Tilt)        Görüntüde ne kadar eğiklik var
+  Durum                 Bu sonuca güvenebilir miyim
+
+Teknik ayrıntılar (eşleşen nokta, hizalama hatası vb.)
+"▸ Ayrıntılar" satırının arkasındadır — normal kullanımda
+bakmanız gerekmez.
+
+
 UNUTMAYIN
 ────────────────────────────────────────────────────────
 
-• Tilt için ASIL güvenilecek değer "Düzlem-dışı tilt"
-  satırıdır. "Keystone X/Y" ikincildir (ölçek/kadraj
-  farkına duyarlı).
+• Önce DURUM satırına bakın:
+     yeşil  → sonucu kullanabilirsiniz
+     sarı   → bir zayıflık var, sebebini okuyun
+     kırmızı→ sonuca güvenmeyin, görüntüyü düzeltin
+
+• Eğiklik "< 3.6°" yazıyorsa bu "tilt YOK" demek DEĞİLDİR.
+  "Tilt bu değerden küçük, tam sayısı bu yöntemle
+  ölçülemiyor" demektir. Yöntem küçük açılarda doğası
+  gereği duyarsızdır.
 
 • Analiz sonrası "Hizalama (overlay)" sekmesine bakın.
   Geniş SARI alanlar = iyi hizalama. Kırmızı/yeşil
   ayrışmışsa sonuca güvenmeyin.
 
-• Tespit güveni 0.7'nin altındaysa yıldız net
-  seçilememiştir.
+• "Ayna (flip) = EVET" normaldir — optik düzenekten
+  kaynaklanır, yazılım otomatik telafi eder.
 
 
 Ayrıntılar için KULLANIM_KILAVUZU.pdf dosyasına bakın.
-Geliştirme notları: optik_analiz/DEVAM_YONERGESI.md
+Geliştirme notları: ../DEVAM_YONERGESI.md
