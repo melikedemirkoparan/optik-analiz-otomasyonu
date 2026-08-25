@@ -43,7 +43,7 @@ class FovResult:
 
 @dataclass
 class TiltResult:
-    in_plane_rotation_deg: float   # düzlem-içi dönme (görüntü saat yönünde eğik)
+    in_plane_rotation_deg: float   # düzlem-içi dönme, ±90'a katlı (eski konvansiyon)
     tilt_x_deg: float              # düzlem-dışı tilt — x ekseni etrafında (keystone dikey)
     tilt_y_deg: float              # düzlem-dışı tilt — y ekseni etrafında (keystone yatay)
     total_tilt_deg: float          # toplam düzlem-dışı eğiklik büyüklüğü
@@ -51,6 +51,10 @@ class TiltResult:
     scale_y: float                 # ölçek (y)
     mirrored: bool                 # görüntü aynalanmış mı (flip)
     homography_ok: bool            # homografi güvenilir mi
+    # Katlanmamış dönme, 0..360. Gerçek yönelim budur; ±90'a katlı alan
+    # 224° gibi açıları 44°'ye düşürdüğü için yönelim raporlarında BU
+    # kullanılmalıdır.
+    in_plane_rotation_full_deg: float = float("nan")
 
 
 # ----------------------------- FOV / IFOV ---------------------------------
@@ -86,7 +90,7 @@ def compute_fov(cfg: SystemConfig) -> FovResult:
         sensor_h_mm=det.sensor_height_mm,
     )
 
-
+ 
 def angle_of_pixel_offset(cfg: SystemConfig, dx_px: float, dy_px: float) -> float:
     """
     Sensör merkezinden (dx, dy) piksel uzaktaki bir noktanın optik eksene
@@ -143,7 +147,15 @@ def decompose_homography(H, image_shape=None) -> TiltResult:
     R = R * signs           # sütunları ölçekle
     K = (K.T * signs).T     # satırları ölçekle
     # Saf düzlem-içi rotasyon açısı (R ortogonal)
-    rot = math.degrees(math.atan2(R[1, 0], R[0, 0]))
+    rot_raw = math.degrees(math.atan2(R[1, 0], R[0, 0]))
+    # KATLANMAMIŞ açı 0..360 aralığında saklanır (in_plane_rotation_full_deg).
+    # 224 derecelik gerçek bir yönelim ±90'a katlanınca 44 dereceye düşer ve
+    # bilgi geri getirilemez biçimde kaybolur — bu, dairesel simetrik olmayan
+    # desenlerde (F harfleri, artı işareti) YANLIŞ sonuçtur.
+    rot_full = rot_raw % 360.0
+    # Geriye dönük uyum: mevcut `in_plane_rotation_deg` ±90'a katlı kalır,
+    # çünkü doğrulanmış referans değerler (+1.583°) bu konvansiyonda üretildi.
+    rot = rot_raw
     while rot > 90:
         rot -= 180
     while rot < -90:
@@ -172,6 +184,7 @@ def decompose_homography(H, image_shape=None) -> TiltResult:
 
     return TiltResult(
         in_plane_rotation_deg=rot,
+        in_plane_rotation_full_deg=rot_full,
         tilt_x_deg=tilt_x,
         tilt_y_deg=tilt_y,
         total_tilt_deg=total_tilt,

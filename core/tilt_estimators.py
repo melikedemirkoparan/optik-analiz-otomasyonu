@@ -53,6 +53,17 @@ RATIO_NOISE_TOL = 0.01
 # gelen ~0.29° tepe hatası ve gerçek çiftlerdeki GT/DET oran farkı ile uyumlu.
 RATIO_SIGMA = 0.002
 
+# Halkaların ortak merkezden sapma toleransı (px). Gerçek tilt merkezleri
+# birkaç piksel kaydırır; F harfleri ve kesikli halka parçaları onlarca
+# piksel uzaktadır (ölçülen: 60-80 px).
+CENTER_TOL_PX = 25.0
+
+# Halka-fit yönteminin oran-ölçüm tabanı. Siemens star yönteminin
+# `RATIO_SIGMA` değerinden düşüktür: halka-fit her halkayı yüzlerce kontur
+# noktasından bağımsız olarak ölçer. Sentetik doğrulamada (test_hydra [1D])
+# 20° ve 35° tilt 0.06° hatayla geri okunuyor — taban buna göre seçildi.
+RING_RATIO_SIGMA = 0.0005
+
 
 @dataclass
 class TiltEstimate:
@@ -225,6 +236,196 @@ def estimate_from_circle(gt_gray: np.ndarray, det_gray: np.ndarray) -> TiltEstim
     est.ok = True
     est.detail = (f"GT oran {gt.axis_ratio:.4f} · DET oran {det.axis_ratio:.4f} "
                   f"· normalize {ratio:.4f}")
+    return est
+
+
+# --------------------------------------------------------------------------
+# 1B) Eş merkezli çember paterni — halka halka elips fit
+# --------------------------------------------------------------------------
+
+def _fit_rings(gray: np.ndarray, min_pts: int = 120,
+               min_radius: float = 25.0, max_resid: float = 0.25) -> list:
+    """
+    Görüntüdeki halkaları tek tek elips olarak fit eder.
+
+    `siemens_star.detect_center_ellipse` bu desende ÇALIŞMAZ: o yöntem
+    yıldızın kamalarını sayarak (teğetsel geçiş yoğunluğu) sınır bulur,
+    eş merkezli çemberde öyle bir yoğunluk yoktur. Burada bunun yerine
+    halkaların kendileri kontur olarak çıkarılır.
+
+    Döndürür: [(r, cx, cy, oran, açı, nokta_sayısı), ...] yarıçapa göre sıralı.
+
+    ÖNEMLİ — kırpılmış yaylar elenir. Görüntü kenarından kesilen bir halka
+    tam elips oluşturmaz; `fitEllipse` ona anlamsız bir şekil uydurur
+    (ölçülen örnekte oran 0.52'ye kadar düşüyordu). Bu yüzden konturun
+    görüntü kenarına değip değmediği denetlenir.
+    """
+    if gray.dtype != np.uint8:
+        gray = np.clip(gray, 0, 255).astype(np.uint8)
+    h, w = gray.shape[:2]
+    blur = cv2.GaussianBlur(gray, (0, 0), 1.5)
+    th = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                               cv2.THRESH_BINARY, 51, -6)
+    cnts, _ = cv2.findContours(th, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+
+    out = []
+    margin = 3
+    for c in cnts:
+        if len(c) < min_pts:
+            continue
+        pts = c.reshape(-1, 2)
+        # Kenara değen kontur = kırpılmış yay -> ele
+        if (pts[:, 0].min() <= margin or pts[:, 1].min() <= margin
+                or pts[:, 0].max() >= w - 1 - margin
+                or pts[:, 1].max() >= h - 1 - margin):
+            continue
+        try:
+            (cx, cy), (MA, ma), ang = cv2.fitEllipse(c)
+        except cv2.error:
+            continue
+        major, minor = max(MA, ma), min(MA, ma)
+        if minor <= 0 or major / 2.0 < min_radius:
+            continue
+
+        # FIT ARTIĞI DENETİMİ — asıl eleme burada yapılır.
+        # Kenara değmeyen ama halka da OLMAYAN konturlar var: bu paternde
+        # F harfleri tam olarak öyledir (kapalı kontur, görüntü içinde,
+        # ama daire değil). `fitEllipse` onlara da bir elips uydurur ve
+        # ölçülen örnekte oran 0.52 / merkez 400 px uzakta çıkıyordu.
+        # Noktaların fit edilen elipse gerçekten oturup oturmadığına
+        # bakmak bu sahte halkaları eler.
+        #
+        # EŞİK NEDEN 0.25: kontur, çizginin İKİ kenarını birden içerir,
+        # dolayısıyla ideal elipsten ±kalınlık/2 sapar ve bu bağıl sapma
+        # BASIK elipslerde büyür (35° tiltte 0.15'e çıkıyor). Ölçülen
+        # ayrım: gerçek halkalar 0.003–0.006, F harfleri 0.55 — arada iki
+        # büyüklük mertebesi boşluk var, 0.25 ikisini rahatça ayırır ve
+        # 45°'ye kadar tilti geçirir.
+        th_ang = np.deg2rad(ang)
+        ca, sa = np.cos(th_ang), np.sin(th_ang)
+        dx, dy = pts[:, 0] - cx, pts[:, 1] - cy
+        u = (dx * ca + dy * sa) / (major / 2.0)
+        v = (-dx * sa + dy * ca) / (minor / 2.0)
+        # İdeal elipste u²+v²=1; sapmanın RMS'i normalize artıktır.
+        resid = float(np.sqrt(np.mean((np.hypot(u, v) - 1.0) ** 2)))
+        if resid > max_resid:
+            continue
+
+        out.append((major / 2.0, float(cx), float(cy),
+                    float(minor / major), float(ang), len(c)))
+    out.sort(key=lambda e: e[0])
+    return out
+
+
+def estimate_from_concentric_rings(det_gray: np.ndarray) -> TiltEstimate:
+    """
+    Eş merkezli çember paterninden tilt.
+
+    GEOMETRİ — hangi etki neye benzer:
+
+      * **decenter**: tüm halkalar BİRLİKTE kayar; birbirlerine göre hâlâ
+        eş merkezlidirler, yalnızca ortak merkez sensör ortasında değildir.
+        Bu tilt DEĞİLDİR ve `pointing.measure_pointing` ayrıca ölçer.
+      * **tilt**: halkalar ELİPSE döner (eksen oranı < 1) ve merkezleri
+        birbirinden AYRIŞIR — dış halkanın merkezi içtekinden kayar.
+
+    Bu yüzden burada iki ayrı kanıt aranır: eksen oranı ve merkez saçılması.
+    İkisi de gürültü seviyesindeyse dürüst bir ÜST SINIR raporlanır —
+    "tilt yok" denmez, "bu yöntemle şu değerin altında" denir.
+
+    Ölçüm yalnızca dedektör görüntüsünden yapılır; ground truth zaten
+    tanım gereği mükemmel dairelerden oluşur (üretimde eş merkezli).
+    """
+    est = TiltEstimate(method="concentric_rings")
+    try:
+        rings = _fit_rings(det_gray)
+    except Exception as e:                                  # noqa: BLE001
+        est.detail = f"halka tespiti hata verdi: {e}"
+        return est
+
+    if len(rings) < 3:
+        est.detail = (f"yeterli tam halka bulunamadı ({len(rings)} adet; "
+                      "en az 3 gerekli — görüntü fazla kırpılmış olabilir)")
+        return est
+
+    # ORTAK MERKEZ ETRAFINDA AYIKLAMA.
+    #
+    # Fit artığı denetimi tek başına yetmiyor: F harfleri ve kesikli FOV
+    # halkasının parçaları da düzgün elipse oturabiliyor (ölçülen fullFrame
+    # çekiminde oran 0.87-0.95, merkezleri gerçek halkalardan 60-80 px
+    # uzakta). Bunlar oran saçılmasını 0.049'a çıkarıp sınırı "< 18°"e
+    # şişiriyordu.
+    #
+    # Ayırt edici özellik ŞUDUR: gerçek halkalar ORTAK bir merkezi paylaşır.
+    # Medyan merkez etrafında toplananlar alınır, uzaktakiler atılır.
+    # (Bu, "halkalar eş merkezli" varsayımı DEĞİL — tilt halkaların
+    # merkezlerini birkaç piksel kaydırır, F harfleri ise onlarca piksel
+    # uzaktadır. Eşik ikisini ayıracak kadar geniş tutulur.)
+    med_cx = float(np.median([r[1] for r in rings]))
+    med_cy = float(np.median([r[2] for r in rings]))
+    kept = [r for r in rings
+            if math.hypot(r[1] - med_cx, r[2] - med_cy) <= CENTER_TOL_PX]
+    if len(kept) < 3:
+        est.detail = (f"ortak merkezi paylaşan yeterli halka yok "
+                      f"({len(kept)}/{len(rings)})")
+        return est
+    dropped = len(rings) - len(kept)
+    rings = kept
+
+    ratios = np.array([r[3] for r in rings], dtype=float)
+    cxs = np.array([r[1] for r in rings], dtype=float)
+    cys = np.array([r[2] for r in rings], dtype=float)
+
+    # Merkez saçılması: halkalar birbirine göre ne kadar kaymış?
+    center_spread = float(np.hypot(cxs.std(), cys.std()))
+
+    # Eksen oranında MEDYAN kullanılır: küçük halkalar birkaç piksel
+    # kalınlığındadır ve fit gürültüsü oranlarını aşağı çeker; medyan bu
+    # aykırı değerlerden etkilenmez.
+    ratio = float(np.median(ratios))
+    spread = float(ratios.std())
+
+    tilt, clamped = _tilt_from_ratio(min(1.0, ratio))
+
+    # BELİRSİZLİK. İki bileşen:
+    #   * ölçülen saçılmanın MEDYANIN standart hatası (spread/sqrt(n)) —
+    #     çok halka varsa medyan daha güvenilirdir,
+    #   * yöntemin kendi tabanı.
+    #
+    # Taban `RATIO_SIGMA` (0.002) DEĞİLDİR: o değer Siemens star elips
+    # yönteminin gürültüsüdür ve halka-fit için fazla karamsardır — 14
+    # temiz halkada saçılma 0.0005 iken taban sınırı 3.6°'ye şişiriyordu.
+    # Halka-fit doğrudan çok sayıda bağımsız ölçüm yaptığı için kendi
+    # tabanı daha düşüktür.
+    n = max(1, len(rings))
+    sigma_ratio = max(spread / math.sqrt(n), RING_RATIO_SIGMA)
+
+    # Belirsizliği DERECEYE çevirirken tilt ile AYNI dönüşüm kullanılır.
+    # `_ratio_sigma_to_deg` oran~1 civarında bir TAVAN uygular (acos'un
+    # dikliğine karşı) ve bu, ölçülen tilt'ten KÜÇÜK bir sigma üretebilir —
+    # "2.30° ± 0.71°" gibi tutarsız bir rapor doğar. Burada bunun yerine
+    # oran aralığının doğrudan karşılığı alınır:
+    #     sigma = |acos(oran - sigma_oran) - acos(oran)|
+    # Böylece sınır her zaman ölçümle aynı ölçekte ve tutarlı olur.
+    r_hi = min(1.0, ratio + sigma_ratio)
+    r_lo = max(0.05, ratio - sigma_ratio)
+    sigma = 0.5 * abs(math.degrees(math.acos(r_lo))
+                      - math.degrees(math.acos(r_hi)))
+    # Taban: hiçbir zaman sıfıra düşmesin (ölçüm sonsuz hassas değildir).
+    sigma = max(sigma, math.degrees(math.acos(1.0 - RING_RATIO_SIGMA)) * 0.5)
+
+    est.tilt_deg = tilt
+    est.sigma_deg = sigma
+    est.clamped = clamped
+    # Güven: kaç halka bulundu + merkezler ne kadar tutarlı.
+    n_conf = min(1.0, len(rings) / 6.0)
+    c_conf = 1.0 / (1.0 + center_spread / 2.0)
+    est.confidence = float(min(n_conf, c_conf))
+    est.ok = True
+    est.detail = (f"{len(rings)} halka · medyan oran {ratio:.4f} "
+                  f"(saçılma {spread:.4f}) · merkez saçılması "
+                  f"{center_spread:.2f} px"
+                  + (f" · {dropped} sahte halka elendi" if dropped else ""))
     return est
 
 
@@ -475,6 +676,9 @@ def measure_tilt(gt_gray: np.ndarray, det_gray: np.ndarray,
     rep = TiltReport()
 
     rep.estimates.append(estimate_from_circle(gt_gray, det_gray))
+    # Eş merkezli çember paterni: `estimate_from_circle` (Siemens star
+    # tabanlı) bu desende çalışmaz, halka-fit yöntemi devreye girer.
+    rep.estimates.append(estimate_from_concentric_rings(det_gray))
     rep.estimates.append(estimate_from_grid(
         det_gray, focal_px=_focal_px(cfg) if cfg else None))
     rep.estimates.append(estimate_from_homography(homography_tilt))

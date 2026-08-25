@@ -19,7 +19,8 @@ import cv2
 import numpy as np
 
 from .config import SystemConfig
-from . import optics, image_analysis, siemens_star, tilt_estimators
+from . import (optics, image_analysis, siemens_star, tilt_estimators,
+               dense_align, pointing)
 
 
 @dataclass
@@ -36,6 +37,14 @@ class AnalysisResult:
 
     # Çoklu yöntem tilt raporu (belirsizlik + yöntem seçimi)
     tilt: tilt_estimators.TiltReport | None = None
+
+    # Yoğun (desen-agnostik) hizalama — piksel piksel kalıntı/distorsiyon.
+    # SIFT yolunun YERİNE GEÇMEZ; yanında koşar ve karşılaştırılabilir.
+    dense: dense_align.DenseResult | None = None
+
+    # Yönelim hataları (decenter / roll / tilt) + FOV kapsaması.
+    # Yoğun hizalamanın homografisinden türetilir; ayrı ölçüm yapmaz.
+    pointing: pointing.PointingResult | None = None
 
     # Önizleme görüntüleri (BGR, GUI için hazır)
     gt_preview: np.ndarray | None = None
@@ -102,6 +111,61 @@ class AnalysisResult:
     def mirrored(self) -> bool:
         return bool(self.match.mirrored) if self.match is not None else False
 
+    # ---- Yoğun hizalama türevleri ----
+
+    @property
+    def dense_ok(self) -> bool:
+        return bool(self.dense is not None and self.dense.ok)
+
+    @property
+    def dense_rotation_deg(self) -> float:
+        """Yoğun yolun ölçtüğü dönme — SIFT'in `rotation_deg`i ile kıyaslanır."""
+        return self.dense.rotation_deg if self.dense_ok else float("nan")
+
+    @property
+    def distortion_summary(self) -> str:
+        """
+        Ölçek serbestliğinden arındırılmış distorsiyon özeti.
+
+        DİKKAT: Bu ölçüm homografiye GÖRE kalıntıdır. Ground truth'un ölçeği
+        bilinmediği için mutlak `f*tan(theta)` modeline göre değil, veriden
+        çözülen en iyi projektif uyuma göre tanımlıdır.
+        """
+        if not self.dense_ok or self.dense.residual is None:
+            return "ölçülemedi"
+        return self.dense.residual.distortion_summary()
+
+    @property
+    def residual_summary(self) -> str:
+        """Piksel piksel kalıntının büyüklük özeti."""
+        if not self.dense_ok or self.dense.residual is None:
+            return "ölçülemedi"
+        return self.dense.residual.summary()
+
+    # ---- Yönelim türevleri ----
+
+    @property
+    def pointing_ok(self) -> bool:
+        return bool(self.pointing is not None and self.pointing.ok)
+
+    @property
+    def decenter_deg(self) -> float:
+        """Desen merkezinin sensör merkezinden açısal kaçıklığı."""
+        return self.pointing.decenter_deg if self.pointing_ok else float("nan")
+
+    @property
+    def roll_deg(self) -> float:
+        """Düzlem-içi dönme — `rotation_deg` ile aynı büyüklük, yönelim dilinde."""
+        return self.pointing.roll_deg if self.pointing_ok else float("nan")
+
+    @property
+    def pointing_summary(self) -> str:
+        return self.pointing.summary() if self.pointing_ok else "ölçülemedi"
+
+    @property
+    def coverage_summary(self) -> str:
+        return self.pointing.coverage_summary() if self.pointing_ok else "ölçülemedi"
+
 
 def _preview(gray: np.ndarray, fit: siemens_star.EllipseFit | None) -> np.ndarray:
     """Gri görüntüyü, varsa elips çizimiyle BGR önizlemeye çevirir."""
@@ -112,12 +176,24 @@ def _preview(gray: np.ndarray, fit: siemens_star.EllipseFit | None) -> np.ndarra
 
 def run_analysis(gt_path: str, det_path: str, cfg: SystemConfig,
                  use_sift: bool = True,
+                 dense: bool = True,
+                 pattern_center_px: tuple | None = None,
+                 pattern_radius_px: float | None = None,
                  progress=None) -> AnalysisResult:
     """
     Tam analizi çalıştırır.
 
     progress: isteğe bağlı callable(yuzde:int, mesaj:str) — GUI ilerleme
               çubuğunu beslemek için.
+    dense:    yoğun (desen-agnostik) hizalamayı da koşar. SIFT yolunun yerine
+              GEÇMEZ, yanında koşar; piksel piksel kalıntı/distorsiyon
+              haritasını yalnızca bu yol üretir. Kapatmak ölçümü hızlandırır.
+
+    pattern_center_px: ground truth'ta desenin merkezi (x, y). Verilmezse
+              görüntü merkezi kullanılır — merkezinde artı işareti olan
+              paternlerde bu zaten doğrudur.
+    pattern_radius_px: ground truth'ta desenin yarıçapı. Verilirse "desen
+              sensöre sığıyor mu" ve "ne kadar pay var" hesaplanır.
     """
     def report(pct, msg):
         if progress is not None:
@@ -179,8 +255,37 @@ def run_analysis(gt_path: str, det_path: str, cfg: SystemConfig,
     except Exception as e:                                  # noqa: BLE001
         res.messages.append(f"Tilt ölçüm katmanı hatası: {e}")
 
+    # --- 5c. Yoğun (desen-agnostik) hizalama + piksel piksel kalıntı ---
+    # Ayrı bir yol olarak koşar: SIFT'in kendine-benzer desenlerde ürettiği
+    # sahte sonuçlara karşı bağımsız bir ölçüm ve distorsiyon haritası verir.
+    if dense:
+        report(88, "Yoğun hizalama (piksel piksel)…")
+        try:
+            res.dense = dense_align.analyze_dense(gt_gray, det_gray)
+            res.messages.extend(res.dense.messages)
+        except Exception as e:                              # noqa: BLE001
+            res.messages.append(f"Yoğun hizalama hatası: {e}")
+
+    # --- 5d. Yönelim hataları (decenter / roll / tilt) + kapsama ---
+    # Yoğun hizalamanın homografisinden türetilir. SIFT homografisi de
+    # kullanılabilir; yoğun yol tercih edilir çünkü desen-agnostiktir ve
+    # kendine-benzer desenlerde sahte sonuç üretmez.
+    if res.dense is not None and res.dense.homography is not None:
+        report(90, "Yönelim hataları ölçülüyor…")
+        try:
+            det_v = dense_align.variants(det_gray).get(
+                res.dense.coarse.variant, det_gray)
+            res.pointing = pointing.measure_pointing(
+                res.dense.homography, gt_gray.shape, det_v.shape, cfg,
+                tilt=res.dense.tilt,
+                pattern_center_px=pattern_center_px,
+                pattern_radius_px=pattern_radius_px)
+            res.messages.extend(res.pointing.messages)
+        except Exception as e:                              # noqa: BLE001
+            res.messages.append(f"Yönelim ölçüm hatası: {e}")
+
     # --- 6. Önizlemeler ---
-    report(85, "Önizlemeler hazırlanıyor…")
+    report(92, "Önizlemeler hazırlanıyor…")
     gt_fit = res.star.gt_ellipse if res.star is not None else None
     det_fit = res.star.det_ellipse if res.star is not None else None
     res.gt_preview = _preview(gt_gray, gt_fit)

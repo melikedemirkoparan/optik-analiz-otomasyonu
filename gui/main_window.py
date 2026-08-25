@@ -28,8 +28,12 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+import cv2
+import numpy as np
+
 from core.config import SystemConfig, Lens, Detector, OLED, default_config
-from core import pipeline
+from core import config as cfgmod
+from core import pipeline, image_analysis
 from gui.widgets import (
     ImageView, ResultRow, hline, STYLESHEET, ACCENT, MUTED, GOOD, WARN, BAD,
 )
@@ -40,26 +44,131 @@ PRESET_DIR = os.path.join(_ROOT, "presets")
 # --------------------------- Arka plan işçisi ------------------------------
 
 class AnalysisWorker(QThread):
-    """Analizi ayrı thread'de koşturur — arayüz donmasın."""
+    """
+    Analizi ayrı thread'de koşturur — arayüz donmasın.
+
+    ROI verilmişse analiz İKİ KEZ çalışır:
+      1. Tam kare  — her iki görüntünün tamamı (asıl/referans sonuç)
+      2. Kırpılmış — GT ve dedektörden aynı bölge kesilip aynı akış tekrar
+
+    İkinci koşu, kırpılan bölgeler geçici dosyaya yazılıp aynı
+    `pipeline.run_analysis` çağrılarak yapılır; böylece iki sonuç birebir
+    aynı kodu kullanır ve karşılaştırılabilir olur.
+    """
     progress = pyqtSignal(int, str)
-    finished_ok = pyqtSignal(object)
+    finished_ok = pyqtSignal(object, object)     # (tam_kare, roi | None)
     failed = pyqtSignal(str)
 
-    def __init__(self, gt_path: str, det_path: str, cfg: SystemConfig):
+    def __init__(self, gt_path: str, det_path: str, cfg: SystemConfig,
+                 roi: tuple[int, int, int, int] | None = None,
+                 roi_src: str = "gt"):
         super().__init__()
         self.gt_path = gt_path
         self.det_path = det_path
         self.cfg = cfg
+        self.roi = roi
+        self.roi_src = roi_src
 
     def run(self):
         try:
-            res = pipeline.run_analysis(
+            # Her iki koşu ortak bir ilerleme çubuğunu paylaşır: ROI varsa
+            # tam kare 0-50, kırpılmış 50-100 aralığına sıkıştırılır.
+            span = 50 if self.roi else 100
+            full = pipeline.run_analysis(
                 self.gt_path, self.det_path, self.cfg,
-                progress=lambda p, m: self.progress.emit(p, m))
-            self.finished_ok.emit(res)
+                progress=lambda p, m: self.progress.emit(
+                    int(p * span / 100), m))
+
+            roi_res = None
+            if self.roi:
+                roi_res = self._run_roi(full)
+
+            self.finished_ok.emit(full, roi_res)
         except Exception as e:                          # noqa: BLE001
             import traceback
             self.failed.emit(f"{e}\n\n{traceback.format_exc()}")
+
+    def _run_roi(self, full):
+        """
+        Kırpılmış bölge için ikinci analizi koşar.
+
+        ROI kullanıcının seçtiği kaynağın (GT ya da dedektör) piksel
+        koordinatlarında. Diğer görüntüde karşılık gelen bölgeyi bulmak için
+        tam kare koşusunun homografisi kullanılır: ROI köşeleri o dönüşümle
+        diğer düzleme taşınır. Homografi yoksa (eşleme başarısızsa) iki
+        görüntü ölçek olarak orantılı kabul edilip ROI oransal eşlenir —
+        kaba ama kadraj benzerse kullanışlı bir yedek.
+        """
+        import tempfile
+        x, y, w, h = self.roi
+        gt_gray = image_analysis.load_image_gray(self.gt_path)
+        det_gray = image_analysis.load_image_gray(self.det_path)
+
+        src_gray = gt_gray if self.roi_src == "gt" else det_gray
+        dst_gray = det_gray if self.roi_src == "gt" else gt_gray
+
+        dst_rect = self._map_rect(full, (x, y, w, h), src_gray, dst_gray)
+
+        src_crop = self._safe_crop(src_gray, (x, y, w, h))
+        dst_crop = self._safe_crop(dst_gray, dst_rect)
+        if src_crop is None or dst_crop is None:
+            return None
+
+        gt_crop = src_crop if self.roi_src == "gt" else dst_crop
+        det_crop = dst_crop if self.roi_src == "gt" else src_crop
+
+        tmp = tempfile.mkdtemp(prefix="optik_roi_")
+        gt_p = os.path.join(tmp, "gt_roi.png")
+        det_p = os.path.join(tmp, "det_roi.png")
+        cv2.imwrite(gt_p, gt_crop)
+        cv2.imwrite(det_p, det_crop)
+
+        res = pipeline.run_analysis(
+            gt_p, det_p, self.cfg,
+            progress=lambda p, m: self.progress.emit(
+                50 + int(p * 0.5), f"[kırpma] {m}"))
+        # Sonuca hangi bölgenin ölçüldüğü iliştirilir (GUI etiketlemek için).
+        res.roi_rect = (x, y, w, h)
+        res.roi_dst_rect = dst_rect
+        res.roi_src = self.roi_src
+        return res
+
+    def _map_rect(self, full, rect, src_gray, dst_gray):
+        """
+        ROI'yi diğer görüntünün koordinatlarına taşır.
+
+        Homografi GT -> dedektör yönünde üretiliyor. ROI dedektörden
+        seçildiyse ters yöne gitmek gerekir, o yüzden matris tersleniyor.
+        """
+        x, y, w, h = rect
+        corners = np.float32([[x, y], [x + w, y],
+                              [x + w, y + h], [x, y + h]]).reshape(-1, 1, 2)
+        H = full.match.homography if full.match is not None else None
+        if H is not None and not getattr(full.match, "degenerate", False):
+            try:
+                M = H if self.roi_src == "gt" else np.linalg.inv(H)
+                proj = cv2.perspectiveTransform(corners, M).reshape(-1, 2)
+                xs, ys = proj[:, 0], proj[:, 1]
+                return (int(xs.min()), int(ys.min()),
+                        int(xs.max() - xs.min()), int(ys.max() - ys.min()))
+            except Exception:                            # noqa: BLE001
+                pass
+        # Yedek: iki görüntü orantılı kabul edilip oransal eşlenir.
+        sh, sw = src_gray.shape[:2]
+        dh, dw = dst_gray.shape[:2]
+        fx, fy = dw / sw, dh / sh
+        return (int(x * fx), int(y * fy), int(w * fx), int(h * fy))
+
+    @staticmethod
+    def _safe_crop(img, rect):
+        """Dikdörtgeni görüntü sınırlarına kısarak keser."""
+        x, y, w, h = rect
+        ih, iw = img.shape[:2]
+        x, y = max(0, x), max(0, y)
+        x2, y2 = min(x + w, iw), min(y + h, ih)
+        if x2 - x < 8 or y2 - y < 8:
+            return None
+        return img[y:y2, x:x2]
 
 
 # ------------------------------ Ana pencere --------------------------------
@@ -75,6 +184,7 @@ class MainWindow(QMainWindow):
         self.det_path: str | None = None
         self.worker: AnalysisWorker | None = None
         self.result = None
+        self.roi_result = None
 
         self._build_ui()
         self._load_config_into_fields(default_config())
@@ -166,57 +276,125 @@ class MainWindow(QMainWindow):
         gl.addWidget(self.det_label, 3, 0, 1, 2)
         lay.addWidget(gb_img)
 
+        lay.addWidget(self._build_roi_group())
+
+        # --- Hazır sistem ---
+        # Katalog yalnızca kolaylık: bir kalem seçmek alanları doldurur,
+        # ardından HER alan elle düzenlenebilir. Elle düzenlenince seçici
+        # kendiliğinden "Özel"e döner — böylece gösterilen seçim ile
+        # alanlardaki değerler asla ayrışmaz.
+        gb_sys = QGroupBox("Hazır sistem")
+        syl = QGridLayout(gb_sys)
+        self.f_system = QComboBox()
+        for key in cfgmod.SYSTEM_PRESETS:
+            self.f_system.addItem(key, key)
+        self.f_system.addItem(cfgmod.CUSTOM, cfgmod.CUSTOM)
+        self._grid_row(syl, 0, "Sistem", self.f_system,
+                       "Lens + dedektörü birlikte doldurur.")
+        self.f_system.activated.connect(self._apply_system_preset)
+        lay.addWidget(gb_sys)
+
         # --- Lens ---
         gb_lens = QGroupBox("Lens")
         ll = QGridLayout(gb_lens)
+        self.f_lens_sel = QComboBox()
+        for key in cfgmod.LENS_CATALOG:
+            self.f_lens_sel.addItem(key, key)
+        self.f_lens_sel.addItem(cfgmod.CUSTOM, cfgmod.CUSTOM)
+        self.f_lens_sel.activated.connect(self._apply_lens_preset)
+
         self.f_lens_name = QLineEdit()
         self.f_focal = self._dspin(1.0, 100000.0, 3, " mm")
         self.f_fnum = self._dspin(0.5, 100.0, 2, "")
-        self._grid_row(ll, 0, "Model", self.f_lens_name)
-        self._grid_row(ll, 1, "Odak uzaklığı f", self.f_focal,
+        self.f_pupil = self._dspin(0.0, 10000.0, 2, " mm")
+        self.f_ufov = self._dspin(0.0, 360.0, 2, " °")
+        self._grid_row(ll, 0, "Hazır lens", self.f_lens_sel)
+        self._grid_row(ll, 1, "Model", self.f_lens_name)
+        self._grid_row(ll, 2, "Odak uzaklığı f", self.f_focal,
                        "FOV ve IFOV doğrudan bu değere bağlıdır.")
-        self._grid_row(ll, 2, "Diyafram f/", self.f_fnum,
+        self._grid_row(ll, 3, "Diyafram f/", self.f_fnum,
                        "Hesabı etkilemez; kayıt amaçlı.")
+        self._grid_row(ll, 4, "Giriş pupili", self.f_pupil,
+                       "0 = f/# ten türet (D = f / N).")
+        self._grid_row(ll, 5, "Üretici FOV", self.f_ufov,
+                       "Üreticinin verdiği kullanılabilir FOV; "
+                       "hesaplanan FOV ile karşılaştırma için.")
         lay.addWidget(gb_lens)
 
         # --- Dedektör ---
         gb_det = QGroupBox("Dedektör")
         dl = QGridLayout(gb_det)
+        self.f_det_sel = QComboBox()
+        for key in cfgmod.DETECTOR_CATALOG:
+            self.f_det_sel.addItem(key, key)
+        self.f_det_sel.addItem(cfgmod.CUSTOM, cfgmod.CUSTOM)
+        self.f_det_sel.activated.connect(self._apply_detector_preset)
+
         self.f_det_name = QLineEdit()
         self.f_det_w = self._ispin(1, 100000, " px")
         self.f_det_h = self._ispin(1, 100000, " px")
         self.f_pitch_x = self._dspin(0.01, 1000.0, 4, " µm")
         self.f_pitch_y = self._dspin(0.01, 1000.0, 4, " µm")
-        self._grid_row(dl, 0, "Model", self.f_det_name)
-        self._grid_row(dl, 1, "Genişlik", self.f_det_w)
-        self._grid_row(dl, 2, "Yükseklik", self.f_det_h)
-        self._grid_row(dl, 3, "Piksel pitch X", self.f_pitch_x)
-        self._grid_row(dl, 4, "Piksel pitch Y", self.f_pitch_y,
+        self._grid_row(dl, 0, "Hazır dedektör", self.f_det_sel)
+        self._grid_row(dl, 1, "Model", self.f_det_name)
+        self._grid_row(dl, 2, "Genişlik", self.f_det_w)
+        self._grid_row(dl, 3, "Yükseklik", self.f_det_h)
+        self._grid_row(dl, 4, "Piksel pitch X", self.f_pitch_x)
+        self._grid_row(dl, 5, "Piksel pitch Y", self.f_pitch_y,
                        "Kare piksel için X ile aynı bırakın.")
         self.lbl_sensor = QLabel("—")
         self.lbl_sensor.setStyleSheet(f"color:{MUTED};")
-        dl.addWidget(self.lbl_sensor, 5, 0, 1, 2)
+        dl.addWidget(self.lbl_sensor, 6, 0, 1, 2)
         lay.addWidget(gb_det)
 
         # Sensör boyutu canlı güncellensin
         for wdg in (self.f_det_w, self.f_det_h, self.f_pitch_x, self.f_pitch_y):
             wdg.valueChanged.connect(self._update_sensor_label)
 
-        # --- OLED ---
-        gb_oled = QGroupBox("OLED (referans ekran)")
+        # Elle düzenleme seçiciyi "Özel"e düşürür (tek doğruluk kaynağı).
+        for wdg in (self.f_focal, self.f_fnum, self.f_pupil):
+            wdg.valueChanged.connect(self._sync_catalog_selectors)
+        for wdg in (self.f_det_w, self.f_det_h, self.f_pitch_x, self.f_pitch_y):
+            wdg.valueChanged.connect(self._sync_catalog_selectors)
+
+        # --- Referans ekran (OLED panel ya da STOS gibi açısal kaynak) ---
+        gb_oled = QGroupBox("Referans ekran")
         ol = QGridLayout(gb_oled)
+        self.f_scr_sel = QComboBox()
+        for key in cfgmod.SCREEN_CATALOG:
+            self.f_scr_sel.addItem(key, key)
+        self.f_scr_sel.addItem(cfgmod.CUSTOM, cfgmod.CUSTOM)
+        self.f_scr_sel.activated.connect(self._apply_screen_preset)
+
         self.f_oled_name = QLineEdit()
         self.f_oled_w = self._ispin(1, 100000, " px")
         self.f_oled_h = self._ispin(1, 100000, " px")
         self.f_oled_pitch = self._dspin(0.01, 1000.0, 4, " µm")
         self.f_oled_aw = self._dspin(0.01, 10000.0, 3, " mm")
         self.f_oled_ah = self._dspin(0.01, 10000.0, 3, " mm")
-        self._grid_row(ol, 0, "Model", self.f_oled_name)
-        self._grid_row(ol, 1, "Genişlik", self.f_oled_w)
-        self._grid_row(ol, 2, "Yükseklik", self.f_oled_h)
-        self._grid_row(ol, 3, "Piksel pitch", self.f_oled_pitch)
-        self._grid_row(ol, 4, "Aktif alan G", self.f_oled_aw)
-        self._grid_row(ol, 5, "Aktif alan Y", self.f_oled_ah)
+        self.f_scr_ang = self._dspin(0.0, 90.0, 5, " °/px")
+        self._grid_row(ol, 0, "Hazır ekran", self.f_scr_sel)
+        self._grid_row(ol, 1, "Model", self.f_oled_name)
+        self._grid_row(ol, 2, "Genişlik", self.f_oled_w)
+        self._grid_row(ol, 3, "Yükseklik", self.f_oled_h)
+        self._grid_row(ol, 4, "Piksel pitch", self.f_oled_pitch)
+        self._grid_row(ol, 5, "Aktif alan G", self.f_oled_aw)
+        self._grid_row(ol, 6, "Aktif alan Y", self.f_oled_ah)
+        self._grid_row(ol, 7, "Açısal çözünürlük", self.f_scr_ang,
+                       "STOS gibi açısal kaynaklarda üreticinin verdiği "
+                       "derece/piksel. 0 = pasif panel (OLED).")
+        # Açısal kaynakta ima edilen odak uzaklığı ve kapsama canlı gösterilir.
+        self.lbl_screen = QLabel("—")
+        self.lbl_screen.setWordWrap(True)
+        self.lbl_screen.setStyleSheet(f"color:{MUTED}; font-size:11px;")
+        ol.addWidget(self.lbl_screen, 8, 0, 1, 2)
+        for wdg in (self.f_oled_w, self.f_oled_h, self.f_oled_pitch,
+                    self.f_scr_ang):
+            wdg.valueChanged.connect(self._update_screen_label)
+            # Elle düzenleme seçiciyi "Özel"e düşürmeli — aksi halde listede
+            # "STOS" yazarken alanlarda başka bir ekran durur (tek doğruluk
+            # kaynağı kuralı, bkz. lens/dedektör seçicileri).
+            wdg.valueChanged.connect(self._sync_catalog_selectors)
         lay.addWidget(gb_oled)
 
         # --- Düzenek ---
@@ -262,6 +440,68 @@ class MainWindow(QMainWindow):
         scroll.setMinimumWidth(340)
         return scroll
 
+    # ---- Sol panel: kırpma / zoom (ROI) ----
+
+    def _build_roi_group(self) -> QGroupBox:
+        """
+        Ölçü girilebilen kırpma penceresi.
+
+        Amaç: görüntünün belirli bir bölgesini verilen piksel ölçüsünde kesip
+        büyütmek. Bu bir *inceleme* aracı — girilen ölçü FOV/IFOV/tilt
+        hesabını değiştirmez (o hesaplar tüm kareyi ve dedektörün gerçek
+        piksel sayısını kullanır). Kırpma yalnızca "şu bölgeye yakından
+        bakayım" ihtiyacını karşılar; ölçüm matematiği parametrik kalır.
+        """
+        gb = QGroupBox("Kırpma (ROI)")
+        g = QGridLayout(gb)
+        g.setColumnStretch(1, 1)
+
+        self.f_roi_src = QComboBox()
+        self.f_roi_src.addItem("Ground truth", "gt")
+        self.f_roi_src.addItem("Dedektör", "det")
+        self._grid_row(g, 0, "Kaynak", self.f_roi_src)
+
+        # Varsayılan 0 = kırpma kapalı. Boyut girilene kadar hiçbir alan
+        # seçilmez; kullanıcı ölçüyü kendisi belirler.
+        self.f_roi_w = self._ispin(0, 100000, " px")
+        self.f_roi_h = self._ispin(0, 100000, " px")
+        for wdg in (self.f_roi_w, self.f_roi_h):
+            wdg.setSpecialValueText("—")     # 0 iken boş görünsün
+            wdg.setValue(0)
+        self._grid_row(g, 1, "Genişlik", self.f_roi_w)
+        self._grid_row(g, 2, "Yükseklik", self.f_roi_h)
+
+        # Konum: hem elle yazılabilir hem görüntüye tıklayarak doldurulur.
+        # İkisi çift yönlü bağlı — tıklayınca alanlar güncellenir, alana
+        # yazınca dikdörtgen taşınır.
+        self.f_roi_cx = self._ispin(0, 100000, " px")
+        self.f_roi_cy = self._ispin(0, 100000, " px")
+        self._grid_row(g, 3, "Merkez X", self.f_roi_cx,
+                       "Görüntüye tıklayarak da seçebilirsiniz.")
+        self._grid_row(g, 4, "Merkez Y", self.f_roi_cy,
+                       "Görüntüye tıklayarak da seçebilirsiniz.")
+
+        btn_center = QPushButton("Ortala")
+        btn_center.clicked.connect(self._roi_center)
+        g.addWidget(btn_center, 5, 0, 1, 2)
+
+        self.lbl_roi_info = QLabel("Ölçü girin, sonra konumu seçin.")
+        self.lbl_roi_info.setStyleSheet(f"color:{MUTED};")
+        self.lbl_roi_info.setWordWrap(True)
+        g.addWidget(self.lbl_roi_info, 6, 0, 1, 2)
+
+        # Merkez ayrıca iç durumda tutuluyor: None = henüz konum seçilmedi
+        # (spinbox 0'ı geçerli bir konum olduğu için ayırt edilemez).
+        self._roi_cx: int | None = None
+        self._roi_cy: int | None = None
+
+        for wdg in (self.f_roi_w, self.f_roi_h):
+            wdg.valueChanged.connect(self._roi_changed)
+        for wdg in (self.f_roi_cx, self.f_roi_cy):
+            wdg.valueChanged.connect(self._roi_center_edited)
+        self.f_roi_src.currentIndexChanged.connect(self._roi_source_changed)
+        return gb
+
     # ---- Orta panel: görüntüler ----
 
     def _build_center_panel(self) -> QWidget:
@@ -284,6 +524,20 @@ class MainWindow(QMainWindow):
             "Kırmızı: dedektör · Yeşil: hizalanmış ground truth. "
             "Sarı bölgeler iyi örtüşmeyi gösterir."),
             "Hizalama (overlay)")
+
+        self.view_crop = ImageView(
+            "Sol panelden ölçü ve konum girin.")
+        self.tabs.addTab(self._wrap_view(
+            self.view_crop,
+            "Seçilen alan. Analiz koşturulduğunda bu bölge için ayrı bir "
+            "ölçüm daha yapılır; sonuçlar sağdaki karşılaştırma tablosunda."),
+            "Kırpma")
+
+        # Görüntüye tıklayınca ROI merkezi oraya taşınsın.
+        self.view_gt.clicked_at.connect(
+            lambda x, y: self._roi_click("gt", x, y))
+        self.view_det.clicked_at.connect(
+            lambda x, y: self._roi_click("det", x, y))
         return self.tabs
 
     def _wrap_view(self, view: ImageView, hint: str) -> QWidget:
@@ -342,19 +596,85 @@ class MainWindow(QMainWindow):
         # 3) Tilt
         gb_tilt = QGroupBox("Eğiklik (Tilt)")
         tl = QVBoxLayout(gb_tilt)
-        self.r_rot = ResultRow("Dönme", "°",
-                               "Görüntünün kendi düzleminde saat yönü dönmesi. "
-                               "Perspektif bozulması yaratmaz.")
+        # "Dönme (SIFT)" satırı PANELDEN KALDIRILDI.
+        #
+        # Aynı büyüklük iki kez gösteriliyordu: bu satır özellik eşleme
+        # (SIFT) yolundan, "Yönelim hataları"ndaki Roll satırı ise yoğun
+        # hizalamadan. Kendine-benzer desenlerde (eş merkezli çember) SIFT
+        # çalışamadığı için burası "ölçülemedi" derken hemen altında Roll
+        # gerçek değeri gösteriyordu — kullanıcı haklı olarak "neden
+        # ölçülemedi?" diye soruyordu. Tek dönme satırı kalsın diye bu
+        # gizlendi.
+        #
+        # Widget YOK EDİLMEDİ: karşılaştırma tablosu ve `_clear_results`
+        # ona başvuruyor, ayrıca SIFT arka planda çalışmaya devam ediyor
+        # (ROI kırpma eşlemesi, eşleşen nokta ve hizalama hatası ondan
+        # geliyor). İleride karşılaştırma istenirse layout'a geri eklemek
+        # yeterli.
+        self.r_rot = ResultRow("Dönme (SIFT)", "°",
+                               "Özellik eşleme (SIFT) yolunun dönme ölçümü. "
+                               "Panelde gösterilmiyor; yoğun hizalamanın "
+                               "ölçümü Roll satırındadır.")
         self.r_tilt = ResultRow("Eğiklik", "°",
                                 "Dedektör düzleminin hedefe göre eğikliği.")
-        for r in (self.r_rot, self.r_tilt):
-            tl.addWidget(r)
+        tl.addWidget(self.r_tilt)
         # Ölçüm belirsizliği / sınır durumu için açıklama satırı
         self.lbl_tilt_note = QLabel("")
         self.lbl_tilt_note.setWordWrap(True)
         self.lbl_tilt_note.setStyleSheet(f"color:{MUTED}; font-size:11px;")
         tl.addWidget(self.lbl_tilt_note)
         lay.addWidget(gb_tilt)
+
+        # 3B) Yönelim hataları — decenter / roll / tilt
+        # Kaynağı yoğun hizalamanın homografisidir (core/pointing.py); ayrı
+        # bir ölçüm değil, aynı homografinin yönelim dilindeki okunuşudur.
+        gb_point = QGroupBox("Yönelim hataları")
+        pl = QVBoxLayout(gb_point)
+        self.r_decenter = ResultRow(
+            "Decenter", "°",
+            "Desen merkezinin sensör merkezinden kaçıklığı (bore-sight hatası). "
+            "Açıya çevirme lens f'i ve piksel pitch'e bağlıdır.")
+        self.r_decenter_px = ResultRow(
+            "Decenter (piksel)", "px",
+            "Aynı kaçıklığın dedektör pikseli cinsinden karşılığı.")
+        self.r_roll = ResultRow(
+            "Roll (düzlem-içi dönme)", "°",
+            "Görüntünün kendi düzleminde dönmesi, 0..360°. Yoğun (desen-agnostik) "
+            "hizalamadan gelir; kendine-benzer desenlerde de çalışır. "
+            "Perspektif bozulması yaratmaz — o 'Eğiklik' satırıdır.")
+        self.r_ptilt = ResultRow(
+            "Tilt (x / y)", "°",
+            "Düzlem-dışı yatışın iki bileşeni: dikey ve yatay keystone.")
+        for r in (self.r_decenter, self.r_decenter_px, self.r_roll, self.r_ptilt):
+            pl.addWidget(r)
+        self.lbl_point_note = QLabel("")
+        self.lbl_point_note.setWordWrap(True)
+        self.lbl_point_note.setStyleSheet(f"color:{MUTED}; font-size:11px;")
+        pl.addWidget(self.lbl_point_note)
+        lay.addWidget(gb_point)
+
+        # 3C) FOV kapsaması — "ekranda en fazla ne kadar alan görünüyor"
+        gb_cov = QGroupBox("FOV kapsaması")
+        cl = QVBoxLayout(gb_cov)
+        self.r_cov_pattern = ResultRow(
+            "Desenin görüneni", "%",
+            "Ground truth deseninin kaçta kaçı sensöre düşüyor.")
+        self.r_cov_sensor = ResultRow(
+            "Sensörün dolan kısmı", "%",
+            "Sensör alanının kaçta kaçı desenle kaplı.")
+        self.r_cov_maxang = ResultRow(
+            "Ulaşılan en büyük açı", "°",
+            "Sensör köşesinin optik eksene göre açısı — pratikte görülen yarı-FOV.")
+        self.r_cov_edges = ResultRow(
+            "Kenar açıları", "°",
+            "Sol / sağ / üst / alt kenarların açısı. Kırpılmış görüntüde asimetriktir.")
+        self.r_cov_margin = ResultRow(
+            "Desen payı", "px",
+            "Deseni tamamen görmek için kalan pay. Negatifse desen taşıyor.")
+        for r in (self.r_cov_pattern, self.r_cov_sensor, self.r_cov_maxang,
+                  self.r_cov_edges, self.r_cov_margin):
+            cl.addWidget(r)
+        lay.addWidget(gb_cov)
 
         # 4) Tek satır durum — sonuca güvenilir mi
         gb_st = QGroupBox("Durum")
@@ -393,6 +713,58 @@ class MainWindow(QMainWindow):
         self.details_box.setVisible(False)
         sl.addWidget(self.details_box)
         lay.addWidget(gb_st)
+
+        # 5) Tam kare ↔ kırpılan bölge karşılaştırması
+        # Yalnızca ROI ile analiz koşulduğunda görünür.
+        self.gb_cmp = QGroupBox("Tam kare ↔ Kırpma")
+        cl = QGridLayout(self.gb_cmp)
+        cl.setSpacing(4)
+        for col, txt in ((1, "Tam kare"), (2, "Kırpma")):
+            h = QLabel(txt)
+            h.setStyleSheet(f"color:{ACCENT}; font-size:11px; font-weight:600;")
+            h.setAlignment(Qt.AlignRight)
+            cl.addWidget(h, 0, col)
+        cl.setColumnStretch(0, 1)
+
+        # (etiket, sonuçtan değeri üreten fonksiyon)
+        # DİKKAT: Dönme, homografi reddedilirse sessizce yıldız elipsine
+        # düşer. Bunu ayırt etmeden göstermek yanıltıcı olur — başarısız
+        # ölçüm "0.000" diye gerçek bir değermiş gibi okunur. Bu yüzden
+        # eşleme güvenilir değilse dönme "—" yazılır ve durum satırında
+        # nedeni belirtilir.
+        self._cmp_rows = [
+            ("Dönme (°)",        lambda r: self._fmt_rotation(r)),
+            # Tilt ayırt edilemiyorsa sayı yerine "< sınır" yazılır —
+            # gürültünün altındaki değeri ölçüm gibi göstermemek için.
+            ("Eğiklik (°)",      lambda r: self._fmt_tilt(r)),
+            ("Eşleşen nokta",    lambda r: ("—" if r.match is None
+                                            else str(r.match.num_inliers))),
+            ("Hizalama h. (px)", lambda r: ("—" if r.match is None else
+                                            self._fmt(r.match.reproj_error_px, 2))),
+            ("Desen güveni",     lambda r: ("—" if r.star is None else
+                                            self._fmt(r.star.det_ellipse.confidence, 2))),
+            ("Eşleme durumu",    lambda r: self._match_state(r)),
+        ]
+        self._cmp_widgets = []
+        for i, (label, _) in enumerate(self._cmp_rows, start=1):
+            lb = QLabel(label)
+            lb.setStyleSheet(f"color:{MUTED}; font-size:11px;")
+            v_full, v_roi = QLabel("—"), QLabel("—")
+            for v in (v_full, v_roi):
+                v.setAlignment(Qt.AlignRight)
+                v.setStyleSheet("font-family:monospace; font-size:11px;")
+            cl.addWidget(lb, i, 0)
+            cl.addWidget(v_full, i, 1)
+            cl.addWidget(v_roi, i, 2)
+            self._cmp_widgets.append((v_full, v_roi))
+
+        self.lbl_cmp_note = QLabel("")
+        self.lbl_cmp_note.setWordWrap(True)
+        self.lbl_cmp_note.setStyleSheet(f"color:{MUTED}; font-size:11px;")
+        cl.addWidget(self.lbl_cmp_note, len(self._cmp_rows) + 1, 0, 1, 3)
+
+        self.gb_cmp.setVisible(False)
+        lay.addWidget(self.gb_cmp)
 
         # Uyarılar
         self.msg_label = QLabel("")
@@ -447,10 +819,159 @@ class MainWindow(QMainWindow):
 
     # ------------------------ config <-> alanlar ---------------------------
 
+    # --------------------- donanım kataloğu seçicileri ---------------------
+
+    def _apply_lens_preset(self):
+        """Açılır listeden lens seçildi — alanları doldur."""
+        key = self.f_lens_sel.currentData()
+        item = cfgmod.lens_from_catalog(key)
+        if item is None:            # "Özel" seçildi: alanlara dokunma
+            return
+        self.f_lens_name.setText(item.name)
+        self.f_focal.setValue(item.focal_length_mm)
+        self.f_fnum.setValue(item.f_number)
+        self.f_pupil.setValue(item.pupil_diameter_mm)
+        self.f_ufov.setValue(item.useful_fov_deg)
+        self._sync_catalog_selectors()
+
+    def _apply_detector_preset(self):
+        """Açılır listeden dedektör seçildi — alanları doldur."""
+        key = self.f_det_sel.currentData()
+        item = cfgmod.detector_from_catalog(key)
+        if item is None:
+            return
+        self.f_det_name.setText(item.name)
+        self.f_det_w.setValue(item.width_px)
+        self.f_det_h.setValue(item.height_px)
+        self.f_pitch_x.setValue(item.pixel_pitch_um)
+        self.f_pitch_y.setValue(item.pixel_pitch_y_um)
+        self._sync_catalog_selectors()
+
+    def _apply_screen_preset(self):
+        """Açılır listeden referans ekran seçildi — alanları doldur."""
+        key = self.f_scr_sel.currentData()
+        item = cfgmod.screen_from_catalog(key)
+        if item is None:            # "Özel": alanlara dokunma
+            return
+        self.f_oled_name.setText(item.name)
+        self.f_oled_w.setValue(item.width_px)
+        self.f_oled_h.setValue(item.height_px)
+        self.f_oled_pitch.setValue(item.pixel_pitch_um)
+        self.f_oled_aw.setValue(item.active_width_mm)
+        self.f_oled_ah.setValue(item.active_height_mm)
+        self.f_scr_ang.setValue(item.angular_res_deg)
+        self._update_screen_label()
+        self._sync_catalog_selectors()
+
+    def _update_screen_label(self):
+        """
+        Referans ekranın açısal kapsamasını canlı gösterir.
+
+        Açısal kaynakta (STOS) üreticinin verdiği derece/piksel bir ODAK
+        UZAKLIĞI ima eder: f = pitch / tan(açısal_çözünürlük). Paternin
+        açısal ölçeği buna dayanır, o yüzden değer ekranda görünmeli.
+        """
+        scr = cfgmod.RefScreen(
+            width_px=self.f_oled_w.value(),
+            height_px=self.f_oled_h.value(),
+            pixel_pitch_um=self.f_oled_pitch.value(),
+            angular_res_deg=self.f_scr_ang.value())
+        if not scr.is_angular_source:
+            self.lbl_screen.setText(
+                "Pasif panel — kendi açısal ölçeği yok "
+                "(açısal çözünürlük 0).")
+            return
+        hx = scr.half_angle_deg(scr.width_px / 2.0)
+        hy = scr.half_angle_deg(scr.height_px / 2.0)
+        txt = (f"Açısal kaynak: ima edilen f = {scr.implied_focal_mm:.2f} mm  ·  "
+               f"panel kapsaması ±{hx:.2f}° × ±{hy:.2f}°")
+        # Cihazın FOV'u biliniyorsa panelin onu taşıyıp taşımadığı da yazılır —
+        # taşımıyorsa desenin kenarları hiç görüntülenemez.
+        half_fov = self.f_ufov.value() / 2.0
+        if half_fov > 0:
+            r = scr.radius_px_for_angle(half_fov)
+            durum = "panel FOV'u taşıyor" if min(hx, hy) >= half_fov \
+                else "DİKKAT: panel cihaz FOV'undan dar"
+            txt += f"  ·  cihaz yarı-FOV {half_fov:.2f}° → r={r:.0f} px ({durum})"
+        self.lbl_screen.setText(txt)
+
+    def _apply_system_preset(self):
+        """Hazır sistem seçildi — lens + dedektörü birlikte doldur."""
+        key = self.f_system.currentData()
+        if key not in cfgmod.SYSTEM_PRESETS:
+            return
+        cfg = cfgmod.system_from_preset(key)
+        # OLED ve düzenek korunur; hazır sistem yalnızca optik zinciri tanımlar.
+        self.f_lens_name.setText(cfg.lens.name)
+        self.f_focal.setValue(cfg.lens.focal_length_mm)
+        self.f_fnum.setValue(cfg.lens.f_number)
+        self.f_pupil.setValue(cfg.lens.pupil_diameter_mm)
+        self.f_ufov.setValue(cfg.lens.useful_fov_deg)
+        self.f_det_name.setText(cfg.detector.name)
+        self.f_det_w.setValue(cfg.detector.width_px)
+        self.f_det_h.setValue(cfg.detector.height_px)
+        self.f_pitch_x.setValue(cfg.detector.pixel_pitch_um)
+        self.f_pitch_y.setValue(cfg.detector.pixel_pitch_y_um)
+        # Referans ekran da sistemin parçası: STOS ile OLED farklı açısal
+        # ölçek tanımlar, sistem değişince ekran da değişmeli.
+        self.f_oled_name.setText(cfg.oled.name)
+        self.f_oled_w.setValue(cfg.oled.width_px)
+        self.f_oled_h.setValue(cfg.oled.height_px)
+        self.f_oled_pitch.setValue(cfg.oled.pixel_pitch_um)
+        self.f_oled_aw.setValue(cfg.oled.active_width_mm)
+        self.f_oled_ah.setValue(cfg.oled.active_height_mm)
+        self.f_scr_ang.setValue(cfg.oled.angular_res_deg)
+        self._update_screen_label()
+        self._sync_catalog_selectors()
+
+    def _sync_catalog_selectors(self):
+        """
+        Seçicileri alanlardaki GERÇEK değerlere göre günceller.
+
+        Tek doğruluk kaynağı alanlardır: kullanıcı bir değeri elle
+        değiştirdiğinde seçici kendiliğinden "Özel"e döner. Aksi halde
+        açılır listede "Hydra" yazarken alanlarda başka bir sistem
+        durabilir — panel ile tablo arasındaki eski ayrışmanın aynısı.
+        """
+        lens = Lens(focal_length_mm=self.f_focal.value(),
+                    f_number=self.f_fnum.value(),
+                    pupil_diameter_mm=self.f_pupil.value())
+        det = Detector(width_px=self.f_det_w.value(),
+                       height_px=self.f_det_h.value(),
+                       pixel_pitch_um=self.f_pitch_x.value(),
+                       pixel_pitch_y_um=self.f_pitch_y.value())
+        scr = cfgmod.RefScreen(width_px=self.f_oled_w.value(),
+                               height_px=self.f_oled_h.value(),
+                               pixel_pitch_um=self.f_oled_pitch.value(),
+                               angular_res_deg=self.f_scr_ang.value())
+        lkey = cfgmod.match_lens_key(lens)
+        dkey = cfgmod.match_detector_key(det)
+        skey = cfgmod.match_screen_key(scr)
+
+        for combo, key in ((self.f_lens_sel, lkey), (self.f_det_sel, dkey),
+                           (self.f_scr_sel, skey)):
+            combo.blockSignals(True)
+            combo.setCurrentIndex(max(0, combo.findData(key)))
+            combo.blockSignals(False)
+
+        # Hazır sistem yalnızca İKİSİ de eşleşiyorsa o sistemi gösterir.
+        syskey = cfgmod.CUSTOM
+        for name, (lk, dk, sk) in cfgmod.SYSTEM_PRESETS.items():
+            if lk == lkey and dk == dkey and sk == skey:
+                syskey = name
+                break
+        self.f_system.blockSignals(True)
+        self.f_system.setCurrentIndex(max(0, self.f_system.findData(syskey)))
+        self.f_system.blockSignals(False)
+
+    # ------------------------ config <-> alanlar ---------------------------
+
     def _load_config_into_fields(self, cfg: SystemConfig):
         self.f_lens_name.setText(cfg.lens.name)
         self.f_focal.setValue(cfg.lens.focal_length_mm)
         self.f_fnum.setValue(cfg.lens.f_number)
+        self.f_pupil.setValue(cfg.lens.pupil_diameter_mm)
+        self.f_ufov.setValue(cfg.lens.useful_fov_deg)
 
         self.f_det_name.setText(cfg.detector.name)
         self.f_det_w.setValue(cfg.detector.width_px)
@@ -464,11 +985,14 @@ class MainWindow(QMainWindow):
         self.f_oled_pitch.setValue(cfg.oled.pixel_pitch_um)
         self.f_oled_aw.setValue(cfg.oled.active_width_mm)
         self.f_oled_ah.setValue(cfg.oled.active_height_mm)
+        self.f_scr_ang.setValue(getattr(cfg.oled, "angular_res_deg", 0.0))
+        self._update_screen_label()
 
         idx = self.f_setup.findData(cfg.setup_type)
         self.f_setup.setCurrentIndex(max(0, idx))
         self.f_coll_f.setValue(cfg.collimator_focal_length_mm)
         self._update_sensor_label()
+        self._sync_catalog_selectors()
 
     def _config_from_fields(self) -> SystemConfig:
         return SystemConfig(
@@ -479,6 +1003,8 @@ class MainWindow(QMainWindow):
                 name=self.f_lens_name.text(),
                 focal_length_mm=self.f_focal.value(),
                 f_number=self.f_fnum.value(),
+                pupil_diameter_mm=self.f_pupil.value(),
+                useful_fov_deg=self.f_ufov.value(),
             ),
             detector=Detector(
                 name=self.f_det_name.text(),
@@ -494,6 +1020,7 @@ class MainWindow(QMainWindow):
                 pixel_pitch_um=self.f_oled_pitch.value(),
                 active_width_mm=self.f_oled_aw.value(),
                 active_height_mm=self.f_oled_ah.value(),
+                angular_res_deg=self.f_scr_ang.value(),
             ),
         )
 
@@ -501,6 +1028,140 @@ class MainWindow(QMainWindow):
 
     _IMG_FILTER = ("Görüntüler (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;"
                    "Tüm dosyalar (*)")
+
+    # ------------------------- kırpma / zoom (ROI) -------------------------
+
+    def _roi_view(self, src: str | None = None) -> ImageView:
+        """Seçili ROI kaynağına karşılık gelen görüntü paneli."""
+        if src is None:
+            src = self.f_roi_src.currentData()
+        return self.view_gt if src == "gt" else self.view_det
+
+    def _roi_rect(self) -> tuple[int, int, int, int] | None:
+        """
+        Girilen ölçü ve merkezden ROI dikdörtgenini üretir (x, y, w, h).
+
+        Ölçü 0 (girilmemiş) ya da merkez henüz seçilmemişse None döner —
+        kırpma kapalıdır. Ölçü görüntüden büyükse görüntüye kısılır, merkez
+        kenara dayanınca içeri kaydırılır.
+        """
+        iw, ih = self._roi_view().image_size()
+        if iw == 0 or ih == 0:
+            return None
+        w, h = self.f_roi_w.value(), self.f_roi_h.value()
+        if w <= 0 or h <= 0 or self._roi_cx is None or self._roi_cy is None:
+            return None
+        w, h = min(w, iw), min(h, ih)
+        x = max(0, min(int(self._roi_cx - w / 2), iw - w))
+        y = max(0, min(int(self._roi_cy - h / 2), ih - h))
+        return (x, y, w, h)
+
+    def _roi_changed(self):
+        """Ölçü/merkez değişti — dikdörtgeni ve kırpma önizlemesini tazele."""
+        src = self.f_roi_src.currentData()
+        # Dikdörtgen yalnızca seçili kaynakta görünsün.
+        self._roi_view("gt" if src == "det" else "det").set_roi(None)
+
+        rect = self._roi_rect()
+        self._roi_view().set_roi(rect)
+
+        if rect is None:
+            self.view_crop.clear_image()
+            if self._roi_view().image_size()[0] == 0:
+                self.lbl_roi_info.setText("Önce bu kaynağın görüntüsünü seçin.")
+            else:
+                self.lbl_roi_info.setText("Ölçü girin, sonra konumu seçin.")
+            return
+
+        crop = self._roi_crop(src, rect)
+        if crop is None:
+            self.lbl_roi_info.setText("Görüntü okunamadı.")
+            self.view_crop.clear_image()
+            return
+
+        self.view_crop.set_image(crop)
+        x, y, w, h = rect
+        self.lbl_roi_info.setText(f"{w}×{h} px · konum ({x}, {y})")
+
+    def _roi_crop(self, src: str, rect: tuple[int, int, int, int]):
+        """
+        ROI'yi *ham* dosyadan keser.
+
+        Panelde gösterilen görüntü analiz sonrası elips çizimi içerebiliyor;
+        kırpma incelemesinde o çizimi değil gerçek piksel verisini görmek
+        gerekir. Bu yüzden önizleme değil, dosya yeniden okunuyor.
+        """
+        import cv2
+        path = self.gt_path if src == "gt" else self.det_path
+        if not path:
+            return None
+        img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            return None
+        x, y, w, h = rect
+        ih, iw = img.shape[:2]
+        # Panel görüntüsü ile dosya boyutu birebir; yine de sınırları kırp.
+        x2, y2 = min(x + w, iw), min(y + h, ih)
+        if x >= x2 or y >= y2:
+            return None
+        return img[y:y2, x:x2]
+
+    def _roi_click(self, src: str, x: int, y: int):
+        """Görüntüye tıklanınca ROI merkezini oraya taşı ve alanları doldur."""
+        if self.f_roi_src.currentData() != src:
+            return
+        self._roi_cx, self._roi_cy = x, y
+        # Alanları sinyal tetiklemeden güncelle — yoksa _roi_center_edited
+        # geri çağrılıp aynı işi tekrarlar.
+        for wdg, val in ((self.f_roi_cx, x), (self.f_roi_cy, y)):
+            wdg.blockSignals(True)
+            wdg.setValue(val)
+            wdg.blockSignals(False)
+        self._roi_changed()
+
+    def _roi_center_edited(self):
+        """Merkez alanına elle yazıldı — dikdörtgeni oraya taşı."""
+        self._roi_cx = self.f_roi_cx.value()
+        self._roi_cy = self.f_roi_cy.value()
+        self._roi_changed()
+
+    def _roi_center(self):
+        """ROI'yi görüntünün ortasına taşır."""
+        iw, ih = self._roi_view().image_size()
+        if iw == 0:
+            return
+        self._roi_click(self.f_roi_src.currentData(), iw // 2, ih // 2)
+
+    def _roi_reset_for(self, src: str):
+        """
+        Ölçü ve konum alanlarının üst sınırlarını `src` görüntüsüne göre kurar
+        ve seçili konumu sıfırlar.
+
+        Üst sınır görüntü boyutuna çekilince kullanıcı görüntü dışında bir
+        alan ya da konum giremez. Konum sıfırlanır: kırpma, ölçü ve konum
+        girilene kadar kapalı kalır.
+        """
+        iw, ih = self._roi_view(src).image_size()
+        if iw and ih:
+            self.f_roi_w.setMaximum(iw)
+            self.f_roi_h.setMaximum(ih)
+            self.f_roi_cx.setMaximum(iw - 1)
+            self.f_roi_cy.setMaximum(ih - 1)
+        self._roi_cx = self._roi_cy = None
+        for wdg in (self.f_roi_cx, self.f_roi_cy):
+            wdg.blockSignals(True)
+            wdg.setValue(0)
+            wdg.blockSignals(False)
+        self._roi_changed()
+
+    def _roi_on_image_loaded(self, src: str):
+        """Yeni görüntü yüklendi — o kaynak seçiliyse ROI'yi ona göre kur."""
+        if self.f_roi_src.currentData() == src:
+            self._roi_reset_for(src)
+
+    def _roi_source_changed(self):
+        """Kaynak değişti — ROI'yi yeni kaynağa göre kur."""
+        self._roi_reset_for(self.f_roi_src.currentData())
 
     def _pick_gt(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -513,6 +1174,7 @@ class MainWindow(QMainWindow):
             import cv2
             self.view_gt.set_image(cv2.imread(path, cv2.IMREAD_GRAYSCALE))
             self.tabs.setCurrentIndex(0)
+            self._roi_on_image_loaded("gt")
 
     def _pick_det(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -525,6 +1187,7 @@ class MainWindow(QMainWindow):
             import cv2
             self.view_det.set_image(cv2.imread(path, cv2.IMREAD_GRAYSCALE))
             self.tabs.setCurrentIndex(1)
+            self._roi_on_image_loaded("det")
 
     def _save_preset(self):
         os.makedirs(PRESET_DIR, exist_ok=True)
@@ -570,7 +1233,11 @@ class MainWindow(QMainWindow):
         self.msg_label.setText("")
         self._clear_results()
 
-        self.worker = AnalysisWorker(self.gt_path, self.det_path, cfg)
+        # ROI seçiliyse analiz iki kez koşar: tam kare + kırpılan bölge.
+        roi = self._roi_rect()
+        self.worker = AnalysisWorker(self.gt_path, self.det_path, cfg,
+                                     roi=roi,
+                                     roi_src=self.f_roi_src.currentData())
         self.worker.progress.connect(self._on_progress)
         self.worker.finished_ok.connect(self._on_finished)
         self.worker.failed.connect(self._on_failed)
@@ -586,24 +1253,169 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Analiz başarısız.")
         QMessageBox.critical(self, "Analiz hatası", msg)
 
-    def _on_finished(self, res):
+    def _on_finished(self, res, roi_res=None):
         self.btn_run.setEnabled(True)
         self.progress.setVisible(False)
         self.result = res
+        self.roi_result = roi_res
         self._show_results(res)
+        self._show_comparison(res, roi_res)
 
     # ---------------------------- sonuç gösterimi --------------------------
+
+    @staticmethod
+    def _match_ok(res) -> bool:
+        """
+        Bu koşunun homografisi kullanılabilir mi?
+
+        Dejenere homografi reddedildiğinde `rotation_deg` sessizce yıldız
+        elipsine düşer; o sayı bir ölçüm değil yedektir. Karşılaştırmada
+        ayırt edilmesi gerekir.
+        """
+        m = getattr(res, "match", None)
+        return bool(m is not None and m.homography is not None
+                    and not getattr(m, "degenerate", False))
+
+    @staticmethod
+    def _match_state(res) -> str:
+        """
+        Eşlemenin durumunu tek kelimeyle özetler.
+
+        Dejenere kontrolü önce yapılır: dejenere durumda `homography` zaten
+        None'a çekilir (bkz. image_analysis.analyze), o yüzden None kontrolü
+        önce gelirse gerçek neden gizlenir ve "eşleşmedi" gibi yanlış bir
+        teşhis görünür — oysa eşleşme bulunmuş, güvenilmez olduğu için
+        reddedilmiştir.
+        """
+        m = getattr(res, "match", None)
+        if m is None:
+            return "eşleşmedi"
+        if getattr(m, "degenerate", False):
+            return "dejenere"
+        if m.homography is None:
+            return "eşleşmedi"
+        return "sağlam"
+
+    @classmethod
+    def _fmt_rotation(cls, res, missing: str = "—") -> str:
+        """
+        Düzlem-içi dönmeyi panel ve tablo için AYNI kuralla yazar.
+
+        Homografi reddedildiğinde `rotation_deg` sessizce yıldız elipsinin
+        eksen açısı farkına düşer (bkz. pipeline.AnalysisResult.rotation_deg).
+        Yıldız neredeyse daire olduğunda o eksen açısı tanımsıza yakındır —
+        çıkan sayı ölçüm değil gürültüdür ve dejenere kırpmada "0.000" gibi
+        inandırıcı görünür.
+
+        Karar tek yerde verilir: hem sonuç paneli hem karşılaştırma tablosu
+        bunu çağırır. Aksi halde aynı ölçüm iki yerde farklı görünür — panel
+        yedek sayıyı yazarken tablo "—" gösterir. Yalnızca eksik değerin
+        yazılışı çağırana bırakılır (`missing`), kararın kendisi değil.
+        """
+        if not cls._match_ok(res):
+            return missing
+        return cls._fmt(res.rotation_deg, 3)
+
+    @classmethod
+    def _fmt_tilt(cls, res) -> str:
+        """
+        Eğikliği "Eğiklik (Tilt)" paneliyle AYNI kuralla yazar.
+
+        Sınır değeri `sigma_deg`'in kendisidir (1-sigma) — panelde
+        `< {sigma:.1f}` biçiminde gösteriliyor. Burada başka bir çarpan
+        kullanmak (örn. 2σ) aynı ölçümün iki yerde farklı görünmesine yol
+        açar; tek doğruluk kaynağı `res.tilt` raporudur.
+        """
+        rep = getattr(res, "tilt", None)
+        if rep is None or not rep.ok:
+            return "ölçülemedi"
+        if not rep.resolvable:
+            return f"< {rep.sigma_deg:.1f}"
+        return f"{rep.tilt_deg:.3f}"
+
+    @staticmethod
+    def _fmt(val, dec: int) -> str:
+        """Sayıyı sabit ondalıkla yazar; NaN/None ise '—'."""
+        try:
+            f = float(val)
+        except (TypeError, ValueError):
+            return "—"
+        if f != f:                                  # NaN
+            return "—"
+        return f"{f:.{dec}f}"
+
+    def _show_comparison(self, full, roi_res):
+        """Tam kare ve kırpılan bölge sonuçlarını yan yana yazar."""
+        if roi_res is None:
+            self.gb_cmp.setVisible(False)
+            return
+
+        for (v_full, v_roi), (_, getter) in zip(self._cmp_widgets,
+                                                self._cmp_rows):
+            try:
+                a = getter(full)
+            except Exception:                       # noqa: BLE001
+                a = "—"
+            try:
+                b = getter(roi_res)
+            except Exception:                       # noqa: BLE001
+                b = "—"
+            v_full.setText(a)
+            v_roi.setText(b)
+            # Değerler ayrışıyorsa kırpma sütununu vurgula — bölgesel fark
+            # tam da bakılmak istenen şey.
+            farkli = a != b and "—" not in (a, b)
+            v_roi.setStyleSheet(
+                "font-family:monospace; font-size:11px;"
+                + (f"color:{WARN};" if farkli else ""))
+
+        x, y, w, h = roi_res.roi_rect
+        kaynak = "ground truth" if roi_res.roi_src == "gt" else "dedektör"
+        satirlar = [f"Kırpma: {kaynak} üzerinde {w}×{h} px @ ({x}, {y})."]
+
+        # Kırpma ölçümü güvenilir değilse bunu açıkça söyle. Aksi halde
+        # yedeğe düşmüş bir sayı gerçek bölgesel farkmış gibi okunur.
+        if not self._match_ok(roi_res):
+            durum = self._match_state(roi_res)
+            if durum == "dejenere":
+                satirlar.append(
+                    "⚠ Kırpılan bölgede eşleme DEJENERE — bu alan kendine "
+                    "benzer (Siemens star'ın radyal deseni) olduğu için "
+                    "sahte eşleşmeler üretiyor. Dönme ölçülemedi. Daha geniş "
+                    "ya da desen çeşitliliği olan bir bölge seçin.")
+            else:
+                satirlar.append(
+                    "⚠ Kırpılan bölgede yeterli eşleşme bulunamadı — bölge "
+                    "çok küçük ya da ayırt edici desen içermiyor olabilir.")
+        satirlar.append(
+            "FOV ve IFOV karşılaştırmaya dahil değil — onlar görüntüden "
+            "değil lens/dedektör parametrelerinden hesaplanır, kırpmayla "
+            "değişmez.")
+
+        self.lbl_cmp_note.setText("\n".join(satirlar))
+        self.lbl_cmp_note.setStyleSheet(
+            f"color:{WARN if not self._match_ok(roi_res) else MUTED}; "
+            f"font-size:11px;")
+        self.gb_cmp.setVisible(True)
 
     def _clear_results(self):
         for r in (self.r_fov_xy, self.r_fov_d,
                   self.r_ifov, self.r_ifov_as,
                   self.r_rot, self.r_tilt,
                   self.r_sensor, self.r_tilt_method, self.r_el_conf,
-                  self.r_mirror, self.r_inliers, self.r_reproj):
+                  self.r_mirror, self.r_inliers, self.r_reproj,
+                  self.r_decenter, self.r_decenter_px, self.r_roll, self.r_ptilt,
+                  self.r_cov_pattern, self.r_cov_sensor, self.r_cov_maxang,
+                  self.r_cov_edges, self.r_cov_margin):
             r.clear()
         self.lbl_tilt_note.setText("")
+        self.lbl_point_note.setText("")
         self.lbl_verdict.setText("—")
         self.lbl_verdict.setStyleSheet(f"color:{MUTED}; font-size:13px;")
+        self.gb_cmp.setVisible(False)
+        for v_full, v_roi in self._cmp_widgets:
+            v_full.setText("—")
+            v_roi.setText("—")
 
     def _show_results(self, res):
         # ---- 1) FOV — sensörün gördüğü toplam açı ----
@@ -623,9 +1435,24 @@ class MainWindow(QMainWindow):
             self.r_ifov_as.set_value(f"{f.ifov_x_arcsec:.3f}")
 
         # ---- 3) Tilt ----
-        rot = res.rotation_deg
-        if rot == rot:                      # NaN değilse
-            self.r_rot.set_value(f"{rot:+.3f}")
+        # Dönme, tabloyla AYNI süzgeçten geçer (_fmt_rotation): eşleme
+        # dejenereyse gösterilen sayı ölçüm değil yıldız elipsinden gelen
+        # yedektir. Eskiden panel bu yedeği "+0.000" diye gerçek bir değer
+        # gibi yazarken tablo "—" gösteriyordu — aynı koşu iki yerde farklı
+        # okunuyordu.
+        rot = self._fmt_rotation(res, missing="ölçülemedi")
+        if rot == "ölçülemedi":
+            # SIFT bu desende çalışamadıysa satır boş kalır — ama aynı
+            # büyüklük yoğun hizalamayla ÖLÇÜLMÜŞ olabilir. Kullanıcı
+            # panelde iki dönme satırı görüp "neden ölçülemedi?" diye
+            # sormasın diye, boş satır nereye bakılacağını söyler.
+            p = getattr(res, "pointing", None)
+            if p is not None and p.ok and p.roll_full_deg == p.roll_full_deg:
+                self.r_rot.set_value("SIFT yok → Roll satırına bakın", WARN)
+            else:
+                self.r_rot.set_value(rot, BAD)
+        elif rot != "—":                    # NaN değilse
+            self.r_rot.set_value(f"{float(rot):+.3f}")
 
         self._show_tilt(res)
 
@@ -645,7 +1472,101 @@ class MainWindow(QMainWindow):
                 rcol = GOOD if m.reproj_error_px < 2.0 else WARN
                 self.r_reproj.set_value(f"{m.reproj_error_px:.2f}", rcol)
 
+        self._show_pointing(res)
         self._show_verdict(res)
+
+    def _show_pointing(self, res):
+        """
+        Yönelim hatalarını ve FOV kapsamasını gösterir.
+
+        Kaynak `core/pointing.py`; yoğun hizalamanın homografisinden türetilir.
+        Homografi yoksa ya da yoğun yol koşmadıysa satırlar BOŞ bırakılır —
+        yedek bir sayı yazılmaz (bkz. DEVAM_YONERGESI §5 "tek doğruluk kaynağı").
+        """
+        p = getattr(res, "pointing", None)
+        if p is None or not p.ok:
+            for r in (self.r_decenter, self.r_decenter_px, self.r_roll,
+                      self.r_ptilt, self.r_cov_pattern, self.r_cov_sensor,
+                      self.r_cov_maxang, self.r_cov_edges, self.r_cov_margin):
+                r.set_value("ölçülemedi", MUTED)
+            self.lbl_point_note.setText(
+                "Yönelim hataları yoğun hizalamanın homografisinden türetilir; "
+                "hizalama başarısız olduğu için hesaplanamadı.")
+            return
+
+        # --- Yönelim ---
+        # Decenter için renk eşiği FOV'un kendisinden türetilir; sabit bir
+        # derece değeri farklı donanımda anlamsız olurdu.
+        half_fov = p.fov_x_deg / 2.0 if p.fov_x_deg == p.fov_x_deg else 0.0
+        if half_fov > 0:
+            frac = p.decenter_deg / half_fov
+            dcol = GOOD if frac < 0.02 else (WARN if frac < 0.10 else BAD)
+        else:
+            dcol = MUTED
+        self.r_decenter.set_value(f"{p.decenter_deg:.4f}", dcol)
+        # Yönü YAZIYLA da söyle. Görüntü koordinatlarında y ekseni AŞAĞI
+        # bakar; "y -9.6" tek başına okunduğunda yukarı mı aşağı mı olduğu
+        # belli olmaz. Kullanıcı deseni gözle "sağa ve yukarı kaymış" diye
+        # görüyorsa, panel de aynı dili konuşmalı.
+        yon = []
+        if abs(p.decenter_x_px) >= 0.5:
+            yon.append("sağa" if p.decenter_x_px > 0 else "sola")
+        if abs(p.decenter_y_px) >= 0.5:
+            yon.append("aşağı" if p.decenter_y_px > 0 else "yukarı")
+        yon_txt = (" · " + " ve ".join(yon)) if yon else ""
+        self.r_decenter_px.set_value(
+            f"{p.decenter_px:.2f}  (x {p.decenter_x_px:+.1f}, "
+            f"y {p.decenter_y_px:+.1f}){yon_txt}")
+
+        # GERÇEK yönelim gösterilir (0..360), ±90'a katlı değer değil.
+        # Katlama 136°'yi 44°'ye düşürüyordu — kullanıcı tamamen farklı bir
+        # yönelim okuyordu. Katlı değer parantez içinde referans olarak kalır.
+        if p.roll_full_deg == p.roll_full_deg:
+            self.r_roll.set_value(f"{p.roll_full_deg:.3f}")
+        else:
+            self.r_roll.set_value(f"{-p.roll_deg:+.3f}")
+        self.r_ptilt.set_value(f"{p.tilt_x_deg:+.3f} / {p.tilt_y_deg:+.3f}")
+
+        # --- Kapsama ---
+        if p.coverage_frac == p.coverage_frac:
+            cf = 100.0 * p.coverage_frac
+            ccol = GOOD if p.pattern_fully_visible else WARN
+            self.r_cov_pattern.set_value(f"{cf:.1f}", ccol)
+        if p.sensor_fill_frac == p.sensor_fill_frac:
+            self.r_cov_sensor.set_value(f"{100.0 * p.sensor_fill_frac:.1f}")
+        if p.max_angle_deg == p.max_angle_deg:
+            self.r_cov_maxang.set_value(f"{p.max_angle_deg:.3f}")
+        if p.edge_angles_deg:
+            e = p.edge_angles_deg
+            self.r_cov_edges.set_value(
+                f"{e['sol']:.2f} / {e['sağ']:.2f} / "
+                f"{e['üst']:.2f} / {e['alt']:.2f}")
+        if p.margin_px == p.margin_px:
+            mcol = GOOD if p.margin_px >= 0 else BAD
+            self.r_cov_margin.set_value(
+                f"{p.margin_px:+.0f}  ({p.margin_deg:+.2f}°)", mcol)
+        else:
+            self.r_cov_margin.set_value("desen yarıçapı girilmedi", MUTED)
+
+        # --- Açıklama satırı ---
+        notes = []
+        if not p.pattern_fully_visible:
+            notes.append("Desen sensöre sığmıyor — kenarlardan kırpılıyor.")
+        e = p.edge_angles_deg or {}
+        if e:
+            yatay = (e.get("sol", 0) + e.get("sağ", 0)) / 2.0
+            dikey = (e.get("üst", 0) + e.get("alt", 0)) / 2.0
+            if max(yatay, dikey) > 0 and min(yatay, dikey) / max(yatay, dikey) < 0.5:
+                notes.append(
+                    "Kenar açıları asimetrik — dedektör görüntüsü kırpılmış "
+                    "olabilir; kapsama tam sensör değil bu kadraj için geçerli.")
+        # Ayna belirsizliği roll'ü etkiler; kullanıcı sayıya güvenmeden önce bilmeli.
+        d = getattr(res, "dense", None)
+        if d is not None and getattr(d, "mirror_ambiguous", False):
+            notes.append(
+                "Ayna ekseni belirsiz — roll değeri bu belirsizlikten "
+                "etkilenebilir; decenter ve kapsama etkilenmez.")
+        self.lbl_point_note.setText("  ".join(notes))
 
     def _show_tilt(self, res):
         """
@@ -674,7 +1595,25 @@ class MainWindow(QMainWindow):
                 self.lbl_tilt_note.setText(f"belirsizlik ± {rep.sigma_deg:.2f}°")
             return
 
-        # Rapor yoksa eski davranış
+        if rep is not None:
+            # Rapor VAR ama ok=False: bu bir eksiklik değil, bilinçli bir
+            # REDDİR — ya hiçbir yöntemin önkoşulu sağlanmadı ya da yalnızca
+            # doğrulanmamış (deneysel) yöntem sonuç verdi
+            # (bkz. tilt_estimators.measure_tilt).
+            #
+            # Buradan eski yedek yola düşüp `res.tilt_deg` yazmak, o katmanın
+            # engellemek için var olduğu şeyin ta kendisidir: belirsizliği
+            # bilinmeyen bir sayıyı ölçüm gibi göstermek. Tablo zaten
+            # "ölçülemedi" yazıyordu; panel yedeği yazınca aynı koşu iki
+            # yerde farklı okunuyordu (panel 5.859 / tablo ölçülemedi).
+            self.r_tilt_method.set_value("—")
+            self.r_tilt.set_value("ölçülemedi", BAD)
+            self.lbl_tilt_note.setText(
+                rep.messages[0] if rep.messages else
+                "Eğiklik bu görüntüden güvenilir biçimde ölçülemedi.")
+            return
+
+        # Rapor hiç yoksa (eski sonuç nesnesi) eski davranış
         self.lbl_tilt_note.setText("")
         if tilt == tilt:
             color = GOOD if tilt < 1.0 else (WARN if tilt < 5.0 else BAD)
@@ -697,7 +1636,15 @@ class MainWindow(QMainWindow):
 
         if res.match is not None:
             m = res.match
-            if m.homography is None:
+            # Dejenere ve "hiç eşleşmedi" farklı teşhislerdir: dejenerede
+            # eşleşme bulunmuş ama güvenilmez olduğu için reddedilmiştir.
+            # İkisini "eşleştirilemedi" diye birleştirmek kullanıcıyı yanlış
+            # yere bakmaya yollar (bkz. _match_state).
+            state = self._match_state(res)
+            if state == "dejenere":
+                warnings.append("eşleme dejenere — bu bölgede desen "
+                                "kendine benzer, dönme ölçülemez")
+            elif state == "eşleşmedi":
                 warnings.append("görüntüler eşleştirilemedi")
             elif m.num_inliers < 20:
                 warnings.append(f"az sayıda ortak nokta ({m.num_inliers})")
@@ -730,6 +1677,9 @@ class MainWindow(QMainWindow):
         if res.overlay is not None:
             self.view_overlay.set_image(res.overlay)
             self.tabs.setCurrentIndex(2)
+        # set_image ROI dikdörtgenini silmez ama önizleme boyutu değişmiş
+        # olabilir; ölçüyü yeni görüntüye göre yeniden kıs.
+        self._roi_changed()
 
         # Mesajlar — tilt belirsizliği zaten Tilt bölümünde ve Durum
         # satırında gösteriliyor; burada tekrar etmesin.

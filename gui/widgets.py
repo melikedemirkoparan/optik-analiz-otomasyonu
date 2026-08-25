@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
-from PyQt5.QtCore import Qt, QPoint
-from PyQt5.QtGui import QImage, QPixmap, QPainter, QFont
+from PyQt5.QtCore import Qt, QPoint, QRect, pyqtSignal
+from PyQt5.QtGui import QImage, QPixmap, QPainter, QFont, QPen, QColor
 from PyQt5.QtWidgets import (
     QLabel, QWidget, QVBoxLayout, QHBoxLayout, QFrame, QSizePolicy,
     QScrollArea,
@@ -128,12 +128,23 @@ class ImageView(QLabel):
     """
     Görüntüyü en-boy oranını koruyarak gösteren panel.
     Pencere boyutlandıkça otomatik ölçeklenir.
+
+    Ayrıca bir ROI (ilgi alanı) dikdörtgeni çizebilir. ROI *görüntü piksel*
+    koordinatlarında tutulur; ekrana çizerken o anki ölçek çarpanıyla
+    dönüştürülür. Böylece pencere boyutu değişse de ROI aynı piksel alanını
+    gösterir — ölçü girişi anlamını korur.
     """
+
+    #: Kullanıcı görüntü üzerine tıkladığında (x, y) piksel koordinatı.
+    clicked_at = pyqtSignal(int, int)
 
     def __init__(self, placeholder: str = "Görüntü yüklenmedi"):
         super().__init__()
         self._pix: QPixmap | None = None
         self._placeholder = placeholder
+        self._roi: tuple[int, int, int, int] | None = None   # x, y, w, h
+        self._draw_off = QPoint(0, 0)   # görüntünün panel içindeki sol-üst köşesi
+        self._scale = 1.0               # ekran px / görüntü px
         self.setAlignment(Qt.AlignCenter)
         self.setMinimumSize(240, 200)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -142,9 +153,12 @@ class ImageView(QLabel):
             f"color:{MUTED};")
         self.setText(placeholder)
 
+    # ------------------------------ görüntü -------------------------------
+
     def set_image(self, img: np.ndarray | None):
         if img is None:
             self._pix = None
+            self.setPixmap(QPixmap())
             self.setText(self._placeholder)
             return
         self._pix = cv_to_qpixmap(img)
@@ -153,16 +167,67 @@ class ImageView(QLabel):
     def clear_image(self):
         self.set_image(None)
 
+    def image_size(self) -> tuple[int, int]:
+        """Yüklü görüntünün (genişlik, yükseklik) değeri; yoksa (0, 0)."""
+        if self._pix is None or self._pix.isNull():
+            return (0, 0)
+        return (self._pix.width(), self._pix.height())
+
+    # -------------------------------- ROI ---------------------------------
+
+    def set_roi(self, roi: tuple[int, int, int, int] | None):
+        """ROI'yi görüntü piksel koordinatlarında ayarlar (x, y, w, h)."""
+        self._roi = roi
+        self.update()
+
     def _rescale(self):
         if self._pix is None or self._pix.isNull():
             return
         scaled = self._pix.scaled(self.size(), Qt.KeepAspectRatio,
                                   Qt.SmoothTransformation)
         self.setPixmap(scaled)
+        # Ölçek ve yerleşim offsetini sakla — ROI çizimi ve tıklama eşlemesi
+        # bu ikisine dayanıyor.
+        self._scale = (scaled.width() / self._pix.width()
+                       if self._pix.width() else 1.0)
+        self._draw_off = QPoint((self.width() - scaled.width()) // 2,
+                                (self.height() - scaled.height()) // 2)
 
     def resizeEvent(self, ev):       # noqa: N802 (Qt API)
         super().resizeEvent(ev)
         self._rescale()
+
+    def paintEvent(self, ev):        # noqa: N802 (Qt API)
+        super().paintEvent(ev)
+        if self._roi is None or self._pix is None or self._pix.isNull():
+            return
+        x, y, w, h = self._roi
+        s = self._scale
+        r = QRect(self._draw_off.x() + int(round(x * s)),
+                  self._draw_off.y() + int(round(y * s)),
+                  max(1, int(round(w * s))), max(1, int(round(h * s))))
+
+        p = QPainter(self)
+        # Dış kontur koyu, iç kontur parlak: hem açık hem koyu desende görünür.
+        p.setPen(QPen(QColor(0, 0, 0, 180), 3))
+        p.drawRect(r)
+        p.setPen(QPen(QColor(ACCENT), 1.5))
+        p.drawRect(r)
+        # Merkez artı işareti — ROI'nin nereye oturduğunu okumayı kolaylaştırır.
+        cx, cy = r.center().x(), r.center().y()
+        p.drawLine(cx - 6, cy, cx + 6, cy)
+        p.drawLine(cx, cy - 6, cx, cy + 6)
+        p.end()
+
+    def mousePressEvent(self, ev):   # noqa: N802 (Qt API)
+        """Görüntü üzerine tıklamayı piksel koordinatına çevirip yayınlar."""
+        if self._pix is None or self._pix.isNull() or self._scale <= 0:
+            return
+        px = (ev.pos().x() - self._draw_off.x()) / self._scale
+        py = (ev.pos().y() - self._draw_off.y()) / self._scale
+        w, h = self.image_size()
+        if 0 <= px < w and 0 <= py < h:
+            self.clicked_at.emit(int(px), int(py))
 
 
 # ----------------------------- Sonuç satırı --------------------------------
@@ -201,6 +266,16 @@ class ResultRow(QWidget):
     def set_value(self, text: str, color: str = ACCENT):
         self._value.setText(text)
         self._value.setStyleSheet(f"color:{color};")
+
+    def value(self) -> str:
+        """
+        Gösterilen değer metni.
+
+        Testler panel ile karşılaştırma tablosunun aynı ölçüm için aynı şeyi
+        yazdığını buradan doğrular; olmazsa iç `_value` etiketine uzanmak
+        gerekirdi.
+        """
+        return self._value.text()
 
     def clear(self):
         self.set_value("—", MUTED)
