@@ -220,15 +220,51 @@ def run_analysis(gt_path: str, det_path: str, cfg: SystemConfig,
         res.messages.append(str(e))
         return res
 
+    # --- 3B. Yoğun (desen-agnostik) hizalama ---
+    # SIFT'ten ÖNCE koşar. Sebebi: kendine-benzer desenlerde kör SIFT
+    # dejenere sonuç üretiyor (ayrıntı: image_analysis._guided_match).
+    # Yoğun yolun homografisi SIFT'e ön-bilgi olarak verilince SIFT'in
+    # büyük dönme/ölçeği kendi başına bulması gerekmiyor. Yoğun yol yine
+    # bağımsız bir ölçümdür; SIFT'in yerine geçmez.
+    if dense:
+        report(25, "Yoğun hizalama (piksel piksel)…")
+        try:
+            # Polarite uyumu: beyaz zeminli GT ile koyu zeminli çekim
+            # yoğun hizalamada da eşleşmez (ECC yoğunluk korelasyonudur).
+            # Tersleme geometriyi değiştirmez.
+            gt_dense, inv = image_analysis.match_polarity(gt_gray, det_gray)
+            if inv:
+                res.messages.append(
+                    "Bilgi: ground truth ile dedektörün kontrast polaritesi "
+                    "ters — eşleme için ground truth terslendi; geometri ve "
+                    "ölçüm etkilenmez.")
+            res.dense = dense_align.analyze_dense(gt_dense, det_gray)
+            res.messages.extend(res.dense.messages)
+        except Exception as e:                              # noqa: BLE001
+            res.messages.append(f"Yoğun hizalama hatası: {e}")
+
     # --- 4. Feature eşleme + homografi ---
-    report(30, "Görüntüler eşleniyor (SIFT)…")
+    report(45, "Görüntüler eşleniyor (SIFT)…")
     try:
+        prior_H = res.dense.homography if res.dense is not None else None
+        prior_variant = (res.dense.coarse.variant
+                         if res.dense is not None and res.dense.coarse is not None
+                         else None)
         res.match = image_analysis.analyze(gt_path, det_path, cfg,
-                                           use_sift=use_sift)
+                                           use_sift=use_sift,
+                                           prior_H=prior_H,
+                                           prior_variant=prior_variant)
         if res.match.homography is None:
             res.messages.append(
                 "Görüntüler eşleştirilemedi — dönme/ayna bilgisi homografiden "
                 "alınamadı. Tilt yine de yıldız elipsinden ölçülecek.")
+        elif res.match.guided:
+            res.messages.append(
+                f"Bilgi: eşleme, yoğun hizalamanın homografisiyle güdümlü "
+                f"yapıldı — kör SIFT bu desende çözemiyor "
+                f"({res.match.guided_matches} eşleşme, "
+                f"{res.match.num_inliers} inlier, "
+                f"{res.match.reproj_error_px:.2f} px).")
     except Exception as e:                              # noqa: BLE001
         res.messages.append(f"Eşleme hatası: {e}")
 
@@ -254,17 +290,6 @@ def run_analysis(gt_path: str, det_path: str, cfg: SystemConfig,
         res.messages.extend(res.tilt.messages)
     except Exception as e:                                  # noqa: BLE001
         res.messages.append(f"Tilt ölçüm katmanı hatası: {e}")
-
-    # --- 5c. Yoğun (desen-agnostik) hizalama + piksel piksel kalıntı ---
-    # Ayrı bir yol olarak koşar: SIFT'in kendine-benzer desenlerde ürettiği
-    # sahte sonuçlara karşı bağımsız bir ölçüm ve distorsiyon haritası verir.
-    if dense:
-        report(88, "Yoğun hizalama (piksel piksel)…")
-        try:
-            res.dense = dense_align.analyze_dense(gt_gray, det_gray)
-            res.messages.extend(res.dense.messages)
-        except Exception as e:                              # noqa: BLE001
-            res.messages.append(f"Yoğun hizalama hatası: {e}")
 
     # --- 5d. Yönelim hataları (decenter / roll / tilt) + kapsama ---
     # Yoğun hizalamanın homografisinden türetilir. SIFT homografisi de

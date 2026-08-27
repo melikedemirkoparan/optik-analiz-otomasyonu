@@ -39,6 +39,35 @@ class FovResult:
     fov_diag_deg: float         # köşegen FOV
     sensor_w_mm: float
     sensor_h_mm: float
+    # Hangi projeksiyon modeliyle hesaplandı. FOV sayısı tek başına
+    # eksiktir: aynı f ve sensörle equidistant, rektilineerden ~%1.2
+    # farklı FOV verir. Modelin adı sonuçla BİRLİKTE taşınmalı.
+    projection: str = "rectilinear"
+    # Kenar pikselinin gördüğü açı (µrad). Rektilineerde merkezden
+    # KÜÇÜKTÜR (piksel ölçeği alan boyunca sabit değildir); equidistant'ta
+    # tanım gereği eşittir. "FOV = N × IFOV" yaklaşımının neden kenarda
+    # bozulduğu doğrudan bu farktır.
+    ifov_edge_x_urad: float = float("nan")
+    ifov_edge_y_urad: float = float("nan")
+
+    # ---- Görüntü dairesi kısıtı ----
+    #
+    # Yukarıdaki fov_* alanları SENSÖRÜN GEOMETRİSİNDEN gelir: "şu piksel
+    # eksenden şu kadar uzakta, demek ki şu açıyı görür". Bu, lensin oraya
+    # gerçekten ışık düşürdüğünü VARSAYAR.
+    #
+    # Lensin görüntü dairesi sensörden küçükse bu varsayım çöker: köşeler
+    # dairenin dışında kalır ve KARANLIKTIR. O köşelerin "gördüğü" açı
+    # geometrik bir hesap sonucu olarak vardır ama görüntü olarak yoktur.
+    # Hydra bunun tam örneği: köşegen geometrik olarak 30.56° çıkar, oysa
+    # lens 21.5°'lik bir daire veriyor — köşeler boş.
+    image_circle_mm: float = float("nan")     # lensin daire ÇAPI
+    covers_sensor: bool = True                # daire tüm sensörü kapsıyor mu
+    # Dairenin kestiği gerçek değerler. Daire sensörü tamamen kapsıyorsa
+    # fov_* ile aynıdırlar.
+    eff_fov_x_deg: float = float("nan")
+    eff_fov_y_deg: float = float("nan")
+    eff_fov_diag_deg: float = float("nan")
 
 
 @dataclass
@@ -63,31 +92,84 @@ def compute_fov(cfg: SystemConfig) -> FovResult:
     """
     Sadece sistem parametrelerinden (lens f + dedektör) FOV/IFOV hesaplar.
     Görüntüden bağımsızdır; sistemin teorik/nominal değerleridir.
+
+    PROJEKSİYON MODELİ. Hesap `cfg.lens.projection` alanına uyar. Varsayılan
+    `rectilinear` (r = f·tan θ) — projenin doğrulanmış modeli ve 40-60°
+    tasarımların standardı. Lens f-theta ise (`equidistant`) formüller
+    otomatik değişir; aynı donanımda iki model arasındaki fark Hydra'da
+    ~%1.2'dir, geniş açıda çok daha büyür.
+
+    Köşegen FOV, sensör KÖŞEGEN ÖLÇÜSÜNDEN hesaplanır. Yaygın hata köşegeni
+    açı uzayında Pisagor'la birleştirmektir (hypot(fov_x, fov_y)); açı
+    doğrusal bir büyüklük değildir ve bu Hydra'da 0.365° fazla verir.
+
+    GÖRÜNTÜ DAİRESİ. `fov_*` alanları sensörün GEOMETRİSİNDEN gelir ve
+    lensin oraya ışık düşürdüğünü varsayar. Lensin görüntü dairesi
+    sensörden küçükse köşeler karanlıktır; gerçekte görülen değerler
+    `eff_fov_*` alanlarındadır ve `covers_sensor` False olur.
+
+    Hydra bunun örneği: köşegen geometrik olarak 30.56° çıkar ama lensin
+    dairesi 18.11 mm, sensörün köşegeni 26.07 mm — köşeler dairenin
+    dışında. Gerçekte görülen köşegen 21.50°.
     """
+    from . import projection as proj
+
     f = cfg.lens.focal_length_mm
     det = cfg.detector
+    model = getattr(cfg.lens, "projection", proj.RECTILINEAR)
     pitch_x_mm = det.pixel_pitch_um / 1000.0
     pitch_y_mm = det.pixel_pitch_y_um / 1000.0
 
-    # IFOV — tek piksel açısı
-    ifov_x = 2.0 * math.atan(pitch_x_mm / (2.0 * f))   # rad
-    ifov_y = 2.0 * math.atan(pitch_y_mm / (2.0 * f))
+    # IFOV — merkez pikselin açısı
+    ifov_x = proj.ifov_rad(model, f, pitch_x_mm)
+    ifov_y = proj.ifov_rad(model, f, pitch_y_mm)
 
     # FOV — tüm sensör
-    fov_x = 2.0 * math.atan(det.sensor_width_mm / (2.0 * f))
-    fov_y = 2.0 * math.atan(det.sensor_height_mm / (2.0 * f))
-    fov_d = 2.0 * math.atan(det.diagonal_mm / (2.0 * f))
+    fov_x = proj.full_fov_deg(model, f, det.sensor_width_mm)
+    fov_y = proj.full_fov_deg(model, f, det.sensor_height_mm)
+    fov_d = proj.full_fov_deg(model, f, det.diagonal_mm)
+
+    # Kenar pikselinin açısı — piksel ölçeğinin alan boyunca ne kadar
+    # değiştiğini gösterir.
+    ifov_ex = proj.ifov_rad(model, f, pitch_x_mm, fov_x / 2.0)
+    ifov_ey = proj.ifov_rad(model, f, pitch_y_mm, fov_y / 2.0)
+
+    # --- Görüntü dairesi kısıtı ---
+    # Sensörün her yarı-ölçüsü dairenin yarıçapıyla kırpılır. Kırpma
+    # gerekiyorsa o eksende görülen açı geometrik hesaptan KÜÇÜKTÜR.
+    r_circle = cfg.lens.image_circle_radius_mm()
+    if math.isfinite(r_circle) and r_circle > 0:
+        def _kirp(yari_mm: float) -> float:
+            return 2.0 * proj.half_angle_deg(model, f, min(yari_mm, r_circle))
+        eff_x = _kirp(det.sensor_width_mm / 2.0)
+        eff_y = _kirp(det.sensor_height_mm / 2.0)
+        eff_d = _kirp(det.diagonal_mm / 2.0)
+        # Köşe en uzak nokta; onu kapsıyorsa tüm sensör kapsanıyor demektir.
+        kapsiyor = r_circle >= det.diagonal_mm / 2.0 - 1e-9
+        circle_mm = 2.0 * r_circle
+    else:
+        eff_x, eff_y, eff_d = fov_x, fov_y, fov_d
+        kapsiyor = True
+        circle_mm = float("nan")
 
     return FovResult(
         ifov_x_urad=ifov_x * 1e6,
         ifov_y_urad=ifov_y * 1e6,
         ifov_x_arcsec=math.degrees(ifov_x) * 3600.0,
         ifov_y_arcsec=math.degrees(ifov_y) * 3600.0,
-        fov_x_deg=math.degrees(fov_x),
-        fov_y_deg=math.degrees(fov_y),
-        fov_diag_deg=math.degrees(fov_d),
+        fov_x_deg=fov_x,
+        fov_y_deg=fov_y,
+        fov_diag_deg=fov_d,
         sensor_w_mm=det.sensor_width_mm,
         sensor_h_mm=det.sensor_height_mm,
+        projection=model,
+        ifov_edge_x_urad=ifov_ex * 1e6,
+        ifov_edge_y_urad=ifov_ey * 1e6,
+        image_circle_mm=circle_mm,
+        covers_sensor=bool(kapsiyor),
+        eff_fov_x_deg=eff_x,
+        eff_fov_y_deg=eff_y,
+        eff_fov_diag_deg=eff_d,
     )
 
  
@@ -95,14 +177,19 @@ def angle_of_pixel_offset(cfg: SystemConfig, dx_px: float, dy_px: float) -> floa
     """
     Sensör merkezinden (dx, dy) piksel uzaktaki bir noktanın optik eksene
     göre açısını (derece) döndürür. FOV doğrulaması / nokta-açı sorguları için.
+
+    `compute_fov` ile AYNI projeksiyon modelini kullanır — ayrışırlarsa
+    aynı sensörün kenarı iki farklı açı verirdi.
     """
+    from . import projection as proj
+
     f = cfg.lens.focal_length_mm
+    model = getattr(cfg.lens, "projection", proj.RECTILINEAR)
     pitch_x_mm = cfg.detector.pixel_pitch_um / 1000.0
     pitch_y_mm = cfg.detector.pixel_pitch_y_um / 1000.0
     rx = dx_px * pitch_x_mm
     ry = dy_px * pitch_y_mm
-    r = math.hypot(rx, ry)
-    return math.degrees(math.atan(r / f))
+    return proj.half_angle_deg(model, f, math.hypot(rx, ry))
 
 
 # ----------------------------- Tilt / rotasyon ----------------------------

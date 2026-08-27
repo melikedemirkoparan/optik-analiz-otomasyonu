@@ -52,7 +52,27 @@ import cv2
 import numpy as np
 
 from .config import SystemConfig
+from . import projection
 from . import optics
+
+
+def fmt_shape(shape: tuple) -> str:
+    """(h, w) -> "1280×1024" (genişlik × yükseklik). Boşsa "—"."""
+    if not shape or len(shape) < 2:
+        return "—"
+    return f"{int(shape[1])}×{int(shape[0])}"
+
+
+def fmt_px(n: float) -> str:
+    """
+    Piksel sayısını binlik ayraçla yazar (Türkçe: nokta).
+
+    Kapsama artık oran değil MİKTAR olarak raporlanır — "%61.7" bir bölgenin
+    kaç piksel veri taşıdığını söylemez; "1.279.488 / 2.073.600 px" söyler.
+    """
+    if n != n or n in (float("inf"), float("-inf")):
+        return "—"
+    return f"{n:,.0f}".replace(",", ".")
 
 
 @dataclass
@@ -79,6 +99,13 @@ class PointingResult:
     # --- Kapsama ---
     coverage_frac: float = float("nan")    # desenin sensöre düşen alan oranı
     sensor_fill_frac: float = float("nan") # sensörün desenle dolan oranı
+    # Dedektör uzayında (desen büyütülmüş halde) alanlar
+    pattern_area_px: float = float("nan")  # desenin dedektördeki toplam alanı
+    visible_area_px: float = float("nan")  # bunun sensöre düşen kısmı
+    sensor_area_px: float = float("nan")   # sensör görüntüsünün piksel sayısı
+    # GT'nin KENDİ pikselleriyle: desenin kaç pikseli sensöre düşüyor
+    pattern_area_gt_px: float = float("nan")   # gw * gh
+    visible_area_gt_px: float = float("nan")   # bunun görünen kısmı
     max_angle_deg: float = float("nan")    # sensörde ulaşılan en büyük açı
     edge_angles_deg: dict = field(default_factory=dict)  # sol/sağ/üst/alt
     margin_px: float = float("nan")        # deseni tam görmek için kalan pay
@@ -98,6 +125,7 @@ class PointingResult:
     fov_y_deg: float = float("nan")
     ifov_urad: float = float("nan")
     detector_shape: tuple = ()
+    gt_shape: tuple = ()
     messages: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -110,11 +138,15 @@ class PointingResult:
                 f"roll {roll:.3f}°, tilt {self.tilt_deg:.3f}°")
 
     def coverage_summary(self) -> str:
-        if not self.ok or not math.isfinite(self.coverage_frac):
+        if not self.ok or not math.isfinite(self.visible_area_px):
             return "ölçülemedi"
         vis = "tamamı görünüyor" if self.pattern_fully_visible else "kırpılıyor"
-        return (f"desenin %{100 * self.coverage_frac:.1f}'i sensörde ({vis}), "
-                f"sensörün %{100 * self.sensor_fill_frac:.1f}'i dolu, "
+        return (f"desenden {fmt_px(self.visible_area_gt_px)} / "
+                f"{fmt_px(self.pattern_area_gt_px)} px "
+                f"({fmt_shape(self.gt_shape)}) sensörde ({vis}), "
+                f"sensörden {fmt_px(self.visible_area_px)} / "
+                f"{fmt_px(self.sensor_area_px)} px "
+                f"({fmt_shape(self.detector_shape)}) dolu, "
                 f"en büyük açı {self.max_angle_deg:.2f}°")
 
 
@@ -122,27 +154,39 @@ class PointingResult:
 # Piksel <-> açı
 # ---------------------------------------------------------------------------
 
+def _lens_model(cfg: SystemConfig) -> str:
+    """Konfigürasyondaki projeksiyon modeli (eski nesnelerde rektilineer)."""
+    return getattr(cfg.lens, "projection", projection.RECTILINEAR)
+
+
 def px_to_deg(cfg: SystemConfig, r_px: float) -> float:
     """
     Sensör merkezinden r_px uzaklığın optik eksene göre açısı (derece).
 
-    Tan tabanlı pinhole: theta = atan(r * pitch / f). Küçük açı yaklaşımı
-    (r * IFOV) kenarda %2'den fazla saparsa hatalı olur, kullanılmaz.
+    Dönüşüm lensin PROJEKSİYON MODELİNE uyar; rektilineerde
+    theta = atan(r*pitch/f), equidistant'ta theta = r*pitch/f. Küçük açı
+    yaklaşımı (r * IFOV) hiçbir modelde kullanılmaz — kenarda %2'den fazla
+    sapar (bkz. §7C).
+
+    `optics.compute_fov` ile AYNI modeli kullanması şart: ayrışırlarsa aynı
+    kenar pikseli, FOV satırında bir açı, decenter satırında başka bir açı
+    verirdi.
     """
     f = cfg.lens.focal_length_mm
     if f <= 0:
         return float("nan")
     pitch_mm = cfg.detector.pixel_pitch_um / 1000.0
-    return math.degrees(math.atan(abs(r_px) * pitch_mm / f))
+    return projection.half_angle_deg(_lens_model(cfg), f, abs(r_px) * pitch_mm)
 
 
 def deg_to_px(cfg: SystemConfig, theta_deg: float) -> float:
-    """Açı → sensör merkezinden piksel uzaklığı."""
+    """Açı → sensör merkezinden piksel uzaklığı (px_to_deg'in tersi)."""
     f = cfg.lens.focal_length_mm
     pitch_mm = cfg.detector.pixel_pitch_um / 1000.0
     if pitch_mm <= 0:
         return float("nan")
-    return f * math.tan(math.radians(abs(theta_deg))) / pitch_mm
+    h = projection.image_height_mm(_lens_model(cfg), f, abs(theta_deg))
+    return h / pitch_mm if math.isfinite(h) else float("nan")
 
 
 def _signed_angle(cfg: SystemConfig, d_px: float, pitch_um: float) -> float:
@@ -150,8 +194,9 @@ def _signed_angle(cfg: SystemConfig, d_px: float, pitch_um: float) -> float:
     f = cfg.lens.focal_length_mm
     if f <= 0:
         return float("nan")
-    return math.copysign(
-        math.degrees(math.atan(abs(d_px) * (pitch_um / 1000.0) / f)), d_px)
+    a = projection.half_angle_deg(_lens_model(cfg), f,
+                                  abs(d_px) * (pitch_um / 1000.0))
+    return math.copysign(a, d_px) if math.isfinite(a) else float("nan")
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +270,7 @@ def measure_pointing(H: np.ndarray,
     """
     res = PointingResult()
     res.detector_shape = tuple(det_shape[:2])
+    res.gt_shape = tuple(gt_shape[:2])
 
     errs = cfg.validate()
     if errs:
@@ -299,6 +345,31 @@ def measure_pointing(H: np.ndarray,
         if area_pattern > 1e-9:
             res.coverage_frac = float(area_vis / area_pattern)
         res.sensor_fill_frac = float(area_vis / (dw * dh)) if dw * dh > 0 else 0.0
+        # Oranların yanı sıra HAM piksel sayıları da saklanır; arayüz bunları
+        # gösterir (bkz. fmt_px). Oranlar renk eşiği ve testler için kalır.
+        res.pattern_area_px = float(area_pattern)
+        res.visible_area_px = float(area_vis)
+        res.sensor_area_px = float(dw * dh)
+
+        # Aynı görünen bölgenin GT'NİN KENDİ pikselleriyle karşılığı.
+        # Dedektör uzayındaki alan homografinin büyütmesini taşır (Hydra'da
+        # ~1.26×/eksen → alanda ~1.58×); o yüzden 1280×1024'lük bir GT orada
+        # 2.07 Mpx görünür. "Desenin kaç pikseli kullanıldı" sorusunun
+        # cevabı GT uzayında verilmeli, yoksa toplam GT'nin kendisinden
+        # büyük çıkar. Kırpılmış çokgen H^-1 ile geri taşınıp ölçülür.
+        res.pattern_area_gt_px = float(gw * gh)
+        if len(clipped) >= 3:
+            try:
+                Hinv = np.linalg.inv(np.asarray(H, dtype=np.float64))
+                back = cv2.perspectiveTransform(
+                    np.asarray(clipped, dtype=np.float64).reshape(-1, 1, 2),
+                    Hinv).reshape(-1, 2)
+                if np.all(np.isfinite(back)):
+                    res.visible_area_gt_px = float(_poly_area(back))
+            except (np.linalg.LinAlgError, cv2.error) as e:   # noqa: BLE001
+                res.messages.append(f"Görünen alan GT'ye geri taşınamadı: {e}")
+        else:
+            res.visible_area_gt_px = 0.0
 
         # Sensör köşelerinin optik eksene göre açısı — ulaşılan en büyük açı
         res.max_angle_deg = px_to_deg(cfg, math.hypot(scx, scy))
@@ -329,15 +400,37 @@ def measure_pointing(H: np.ndarray,
             if pattern_radius_px is None:
                 pattern_radius_px = r_gt
         # Beklenen GT->dedektör ölçeği: aynı açı iki ekranda kaç piksel?
-        #   GT'de   r_gt  = f_scr * tan(theta) / pitch_scr
-        #   dedektörde r_det = f_lens * tan(theta) / pitch_det
-        # Oran açıdan bağımsızdır (her ikisi de tan tabanlı).
+        #   GT'de      r_gt  = f_scr  * tan(theta) / pitch_scr   (STOS optiği)
+        #   dedektörde r_det = f_lens * g(theta)   / pitch_det   (lens modeli)
+        #
+        # DİKKAT — oranın açıdan bağımsız olması SADECE iki taraf da AYNI
+        # haritayı kullanırsa geçerlidir. STOS'un kendi optiği tan tabanlıdır
+        # (`RefScreen.radius_px_for_angle` böyle tanımlı); lens de rektilineer
+        # ise tan/tan sadeleşir ve oran sabit bir sayıdır. Lens equidistant
+        # ise oran açıyla DEĞİŞİR ve tek bir "beklenen ölçek" sayısı yoktur.
+        #
+        # Bu durumda ölçek, ölçümün gerçekte yapıldığı yerde — desenin
+        # kapladığı yarıçapta — değerlendirilir: r_det(θ)/r_gt(θ). Sabit bir
+        # oranmış gibi raporlamak, §7B'deki "ölçemediğin yerde sayı uydurma"
+        # hatasının bu satırdaki hâli olurdu.
         pitch_det_mm = det.pixel_pitch_um / 1000.0
         pitch_scr_mm = scr.pixel_pitch_um / 1000.0
+        model = _lens_model(cfg)
         if pitch_det_mm > 0 and scr.implied_focal_mm > 0:
-            res.expected_scale = float(
-                (cfg.lens.focal_length_mm / pitch_det_mm)
-                / (scr.implied_focal_mm / pitch_scr_mm))
+            if model == projection.RECTILINEAR:
+                res.expected_scale = float(
+                    (cfg.lens.focal_length_mm / pitch_det_mm)
+                    / (scr.implied_focal_mm / pitch_scr_mm))
+            else:
+                # Açıya bağlı oran: yarı-FOV'da (desenin kenarında)
+                # değerlendirilir — karşılaştırmanın yapıldığı ölçek odur.
+                theta = half_fov
+                r_det = projection.image_height_mm(
+                    model, cfg.lens.focal_length_mm, theta) / pitch_det_mm
+                r_scr = scr.radius_px_for_angle(theta)
+                if (math.isfinite(r_det) and math.isfinite(r_scr)
+                        and r_scr > 0):
+                    res.expected_scale = float(r_det / r_scr)
             if t is not None:
                 meas = 0.5 * (abs(t.scale_x) + abs(t.scale_y))
                 res.measured_scale = float(meas)
@@ -391,9 +484,14 @@ def format_report(res: PointingResult) -> str:
         lines.append(
             f"  kenar açıları    : sol {e['sol']:.2f}°  sağ {e['sağ']:.2f}°  "
             f"üst {e['üst']:.2f}°  alt {e['alt']:.2f}°")
-    if math.isfinite(res.coverage_frac):
-        lines.append(f"  desenin görünen kısmı : %{100 * res.coverage_frac:.1f}")
-        lines.append(f"  sensörün dolan kısmı  : %{100 * res.sensor_fill_frac:.1f}")
+    if math.isfinite(res.visible_area_px):
+        lines.append(f"  desenden kullanılan   : "
+                     f"{fmt_px(res.visible_area_gt_px)} / "
+                     f"{fmt_px(res.pattern_area_gt_px)} px "
+                     f"({fmt_shape(res.gt_shape)} ground truth)")
+        lines.append(f"  sensörden kullanılan  : {fmt_px(res.visible_area_px)} / "
+                     f"{fmt_px(res.sensor_area_px)} px "
+                     f"({fmt_shape(res.detector_shape)} dedektör)")
     if math.isfinite(res.margin_px):
         durum = "pay var" if res.margin_px >= 0 else "TAŞIYOR"
         lines.append(f"  desen payı       : {res.margin_px:+.1f} px "

@@ -232,8 +232,22 @@ class ImageView(QLabel):
 
 # ----------------------------- Sonuç satırı --------------------------------
 
+# Kaynak rozeti renkleri. Bir sayının NEREDEN geldiği, sayının kendisi kadar
+# önemlidir: datasheet'ten okunan bir değerle başka değerlerden türetilen bir
+# değer aynı güvene sahip değildir ve kullanıcı ikisini ayırt edebilmelidir.
+SRC_GIVEN = "#7c8798"      # datasheet / kullanıcı girdisi — nötr
+SRC_DERIVED = "#c9a0ff"    # türetildi — dikkat çeksin ama alarm olmasın
+
+
 class ResultRow(QWidget):
-    """Etiket + değer gösteren tek satırlık sonuç bileşeni."""
+    """
+    Etiket + değer gösteren tek satırlık sonuç bileşeni.
+
+    Değerin yanında isteğe bağlı bir **kaynak rozeti** taşır: sayının
+    datasheet'ten mi okunduğu yoksa başka değerlerden mi türetildiği.
+    Türetilmiş bir değerde rozetin üstüne gelince türetim zinciri görünür
+    ("IFOV ve piksel pitch'inden türetildi" gibi).
+    """
 
     def __init__(self, label: str, unit: str = "", tooltip: str = ""):
         super().__init__()
@@ -245,6 +259,14 @@ class ResultRow(QWidget):
         if tooltip:
             self._label.setToolTip(tooltip)
             self.setToolTip(tooltip)
+
+        # Kaynak rozeti — varsayılan olarak gizli, `set_source` ile açılır.
+        self._badge = QLabel("")
+        self._badge.setVisible(False)
+        self._badge_on = False
+        bf = QFont()
+        bf.setPointSize(9)
+        self._badge.setFont(bf)
 
         self._value = QLabel("—")
         f = QFont("monospace")
@@ -260,12 +282,55 @@ class ResultRow(QWidget):
         self._unit.setMinimumWidth(58)
 
         lay.addWidget(self._label, 1)
+        lay.addWidget(self._badge, 0)
         lay.addWidget(self._value, 0)
         lay.addWidget(self._unit, 0)
 
     def set_value(self, text: str, color: str = ACCENT):
         self._value.setText(text)
         self._value.setStyleSheet(f"color:{color};")
+
+    def set_source(self, kind: str | None, detail: str = ""):
+        """
+        Değerin kaynağını rozet olarak gösterir.
+
+        `kind`:
+          * ``"given"``   — datasheet ya da kullanıcı girdisi
+          * ``"derived"`` — başka değerlerden hesaplandı
+          * ``None``      — rozet gizlenir (kaynak bilinmiyor/anlamsız)
+
+        `detail` rozetin ipucu metnidir; türetilmiş değerlerde türetim
+        zinciri buraya yazılır. Rozet metnini KISA tutmak şart — satırın
+        asıl işi sayıyı göstermek, rozet yalnızca ona bir güven etiketi
+        iliştirmek.
+        """
+        if kind is None:
+            self._badge.setVisible(False)
+            self._badge_on = False
+            self._badge.setToolTip("")
+            return
+        if kind == "given":
+            metin, renk = "datasheet", SRC_GIVEN
+        else:
+            metin, renk = "türetildi", SRC_DERIVED
+        self._badge.setText(metin)
+        self._badge.setStyleSheet(
+            f"color:{renk}; border:1px solid {renk}; border-radius:6px; "
+            f"padding:0px 5px; font-size:9px;")
+        self._badge.setToolTip(detail or metin)
+        self._badge.setVisible(True)
+        self._badge_on = True
+
+    def source(self) -> str:
+        """
+        Rozet metni; rozet kapalıysa boş.
+
+        `isVisible()` KULLANILMAZ: Qt'de gizli bir pencerenin çocukları da
+        görünmez sayılır, dolayısıyla henüz `show()` edilmemiş bir panelde
+        (testlerin koştuğu hâl) her rozet boş görünürdü. Rozetin AÇIK olup
+        olmadığı ayrı bir bayrakta tutulur.
+        """
+        return self._badge.text() if self._badge_on else ""
 
     def value(self) -> str:
         """
@@ -279,6 +344,7 @@ class ResultRow(QWidget):
 
     def clear(self):
         self.set_value("—", MUTED)
+        self.set_source(None)
 
 
 def hline() -> QFrame:

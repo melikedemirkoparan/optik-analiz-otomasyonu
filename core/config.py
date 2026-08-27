@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict, field, fields
 
 
 @dataclass
@@ -24,6 +24,25 @@ class Lens:
     f_number: float = 5.6                # Diyafram (maksimum açıklık)
     pupil_diameter_mm: float = 0.0       # Giriş pupili çapı (0 = f/# ten türet)
     useful_fov_deg: float = 0.0          # Üreticinin verdiği kullanılabilir FOV
+    # Lensin AÇI -> GÖRÜNTÜ YÜKSEKLİĞİ haritası. FOV/IFOV matematiğinin
+    # altındaki asıl varsayım budur ve lense göre değişir:
+    #   rectilinear  r = f·tan θ    (pinhole; 40-60° tasarımların standardı)
+    #   equidistant  r = f·θ        (f-theta; ölçüm ve balıkgözü objektifleri)
+    #   equisolid / stereographic / orthographic
+    # Varsayılan rektilineerdir — projenin bugüne kadarki (ve doğrulanmış)
+    # modeli odur. Datasheet açıkça yazmıyorsa TAHMİN ETME:
+    # `projection.fit_projection_model` bilinen açı-yarıçap çiftlerinden
+    # hangi modelin uyduğunu ölçer.
+    projection: str = "rectilinear"
+    # Lensin ürettiği GÖRÜNTÜ DAİRESİNİN çapı (mm). Bir lens dairesel bir
+    # görüntü üretir; sensör bu dairenin içinde kalan kısmı görür. Daire
+    # sensörden küçükse KÖŞELER KARANLIKTIR ve oradan gelen "FOV" gerçek
+    # değildir — yalnızca o pikselin geometrik olarak göreceği açıdır.
+    #
+    # 0 = bilinmiyor/sınırsız (daire sensörü tamamen kapsıyor varsayılır).
+    # `useful_fov_deg` verilmişse ondan da türetilebilir; ikisi de varsa
+    # doğrudan verilen çap kullanılır.
+    image_circle_mm: float = 0.0
     notes: str = ""
 
     @property
@@ -39,12 +58,37 @@ class Lens:
             return self.focal_length_mm / self.f_number
         return 0.0
 
+    def image_circle_radius_mm(self) -> float:
+        """
+        Görüntü dairesinin yarıçapı (mm); bilinmiyorsa NaN.
+
+        Öncelik doğrudan verilen çapta. Verilmemişse üreticinin
+        `useful_fov_deg` değerinden türetilir — "kullanılabilir FOV" tam
+        olarak lensin makul görüntü verdiği koninin açısıdır, o koninin
+        sensör düzlemindeki izdüşümü de görüntü dairesidir.
+        """
+        import math
+        if self.image_circle_mm > 0:
+            return self.image_circle_mm / 2.0
+        if self.useful_fov_deg > 0 and self.focal_length_mm > 0:
+            from . import projection as proj
+            r = proj.image_height_mm(self.projection, self.focal_length_mm,
+                                     self.useful_fov_deg / 2.0)
+            return r if math.isfinite(r) else float("nan")
+        return float("nan")
+
     def validate(self) -> list[str]:
         errs = []
         if self.focal_length_mm <= 0:
             errs.append("Lens odak uzaklığı (focal_length_mm) > 0 olmalı.")
         if self.f_number <= 0:
             errs.append("Lens diyafram sayısı (f_number) > 0 olmalı.")
+        from .projection import MODELS
+        if self.projection not in MODELS:
+            errs.append(f"Bilinmeyen projeksiyon modeli: {self.projection!r} "
+                        f"(geçerli: {', '.join(MODELS)}).")
+        if self.image_circle_mm < 0:
+            errs.append("Görüntü dairesi çapı negatif olamaz.")
         return errs
 
 
@@ -163,6 +207,19 @@ class RefScreen:
 OLED = RefScreen
 
 
+def _known_fields(cls, d: dict) -> dict:
+    """
+    Sözlükten yalnızca `cls`'in tanıdığı alanları süzer.
+
+    Preset JSON'ları farklı sürümlerde yazılmış olabilir: eski dosyada yeni
+    alan yoktur (varsayılan devreye girer), yeni dosyada eski koda göre
+    fazladan alan olabilir. İkisi de kullanıcının kaydettiği bir dosyayı
+    açılmaz hale getirmemeli.
+    """
+    names = {f.name for f in fields(cls)}
+    return {k: v for k, v in d.items() if k in names}
+
+
 @dataclass
 class SystemConfig:
     """
@@ -212,9 +269,9 @@ class SystemConfig:
             name=d.get("name", "Sistem"),
             setup_type=d.get("setup_type", "direct"),
             collimator_focal_length_mm=float(d.get("collimator_focal_length_mm", 0.0)),
-            lens=Lens(**d.get("lens", {})),
-            detector=Detector(**d.get("detector", {})),
-            oled=OLED(**d.get("oled", {})),
+            lens=Lens(**_known_fields(Lens, d.get("lens", {}))),
+            detector=Detector(**_known_fields(Detector, d.get("detector", {}))),
+            oled=OLED(**_known_fields(OLED, d.get("oled", {}))),
         )
 
     @classmethod
@@ -248,7 +305,9 @@ LENS_CATALOG: dict[str, Lens] = {
         f_number=1.4,
         pupil_diameter_mm=34.0,
         useful_fov_deg=21.5,
-        notes="Yıldız izleyici objektifi; pupil ve kullanılabilir FOV üreticiden.",
+        notes="Yıldız izleyici objektifi; pupil ve kullanılabilir FOV üreticiden. "
+              "Görüntü dairesi (18.11 mm) sensör köşegeninden (26.07 mm) küçük — "
+              "köşeler karanlık, gerçek FOV her yönde 21.5°.",
     ),
 }
 
