@@ -1586,28 +1586,4 @@ Gerçek çift: roll **223.30°**, homografinin mod-90 değeriyle tutarlı
 yani test **gerçekte olmayan bir belirsizliği** ölçüp çözücüyü haksız yere
 suçluyordu. Sentetik desen gerçeğe uymazsa test bir şey kanıtlamaz.
 
-### Sırada ne var
 
-Roll artık tek değer olarak çözülüyor ama **panele bağlanmadı**.
-`core/pipeline.py` ve `gui/main_window.py` hâlâ `(mod 90°)` gösteriyor;
-`solve_roll_and_mirror` sonucu oraya taşınmalı ve 7I'deki "desen 90°
-dönmelerde kendini tekrarlıyor" notu kaldırılmalı. Ayna kararı da artık
-SIFT inlier eşiğine gerek kalmadan buradan alınabilir.
-
----
-
-## 8. OLASI SONRAKİ ADIMLAR (fikir — kullanıcı istemedi)
-
-- Sonuçları PDF/CSV rapor olarak dışa aktarma.
-- Birden çok görüntü çiftini toplu işleme (batch).
-- Distorsiyon (barrel/pincushion) ölçümü — chart'ın düz çizgilerinden.
-- MTF / keskinlik ölçümü — Siemens star zaten bunun için ideal desen.
-
----
-
-## 9. KULLANICI TERCİHLERİ (çalışma şekli)
-
-- Her tool çağrısı manuel onaylanıyor; kullanıcı çoğu adımı görmek istiyor.
-- Alt-agent (paralel işçi) çağrılarını reddetme eğiliminde — işi ana akışta
-  doğrudan yapmak tercih ediliyor.
-- Türkçe iletişim.
