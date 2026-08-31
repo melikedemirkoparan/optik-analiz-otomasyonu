@@ -113,52 +113,53 @@ def find_f_markers(img: np.ndarray,
             "belirsizliğiyle kalır.")
         return res
 
-    # F'ler AYNI ŞEKLİN dört kopyasıdır: alanları birbirine çok yakın
-    # olmalıdır (yalnızca dönme farkı var). Halka yayı parçaları bu
-    # elemeden geçemez.
+    # DİKKAT — DÖRT F AYNI ŞEKLİN KOPYALARI DEĞİLDİR.
     #
-    # Gerçek desende ölçüldü: üç F'nin alanı tam 747, dördüncü aday olan
-    # yay parçası 712. Yalnızca "en büyük dördü"nü almak o yayı F sanıyordu
-    # ve TÜM eşlemeyi bozuyordu — döndürme testinde 8'de 4 yanlış sonuç
-    # bunun sonucuydu.
+    # Desen üreteci (generate_circle_pattern_passive.corner_positions) F'leri
+    # 0°/90°/45°/270° dönmeleriyle koyar. Üçüncüsü bilerek 45° eğiktir:
+    # "Son F 45 derece verilerek simetri kırılır -- hiçbir dönme/aynalama
+    # kombinasyonu paterni kendine götürmez." Roll'ü 0..360° tekleştiren
+    # BİLGİNİN TAMAMI o eğik F'dedir.
     #
-    # Bu yüzden en kalabalık ALAN KÜMESİ seçilir: her adayı merkez alıp
-    # %12 bandına kaç aday düştüğüne bakılır, en kalabalık band kazanır.
+    # Eğik çizim, piksel ızgarasında farklı bir çevre kutusuna oturur.
+    # Gerçek desende (v6_1deg_inverted) ölçüldü:
+    #
+    #     azimut 45.2 / 135.1 / 315.2 : alan 747, kutu 68x46, doluluk 0.239
+    #     azimut 226.8 (45° eğik F)   : alan 712, kutu 78x49, doluluk 0.186
+    #
+    # Bu yüzden "alanı/dolulukları birbirine benzeyenleri tut" biçimindeki
+    # her eleme, tam da simetriyi kıran F'yi atar. Önceki sürüm bunu
+    # yapıyordu ve 712'yi "halka yayı" sanıyordu; oysa 712 dördüncü F'nin
+    # kendisidir (azimutu 226.8 — tam olması gereken yer).
     aday.sort(key=lambda z: -z[0])
-    if len(aday) > 4:
-        en_iyi_kume = None
-        for merkez_alan, *_ in aday:
-            kume = [a for a in aday
-                    if abs(a[0] - merkez_alan) <= 0.12 * merkez_alan]
-            if en_iyi_kume is None or len(kume) > len(en_iyi_kume):
-                en_iyi_kume = kume
-        if en_iyi_kume and len(en_iyi_kume) >= 3:
-            aday = en_iyi_kume
-    aday = aday[:6]
 
-    # DOLULUK ELEMESİ — F'yi halka parçasından ayıran asıl ölçüt.
+    # Fazla aday varsa YERLEŞİMDEN seçilir, ŞEKİLDEN değil.
     #
-    # Alan tek başına yetmiyor: gerçek desende bir halka parçası 712
-    # piksellik alanla F'lerin 747'sine %4.7 yakındı ve elemeden geçiyordu.
-    # Sonuç, tüm eşlemenin bozulmasıydı — döndürme testinde 8 denemenin
-    # 4'ü yanlış çıkıyordu.
+    # F'ler merkezden eşit uzaklıkta ve ~90° aralıklı dört köşededir. Bu
+    # bir DÖNME DEĞİŞMEZİDİR: desen dönse de dördü hep aynı yarıçapta ve
+    # aynı açısal aralıkta kalır. Şekle (alan/doluluk) dayanan her ölçüt
+    # ise dönmeyle değişir ve 45° eğik F'yi eler.
     #
-    # Ayırt eden şey DOLULUK (alan / çevre kutusu): F kompakt bir harftir
-    # (ölçüldü: 0.239), halka parçası ise kutusunun içinde ince bir yaydır
-    # (0.186). F'ler aynı şeklin dönmüş kopyaları olduğu için dolulukları
-    # da birbirinin aynısıdır; en kalabalık doluluk kümesi F'lerdir.
-    if len(aday) > 3:
-        dol = [(a[0] / max(1.0, a[4] * a[5]), i) for i, a in enumerate(aday)]
-        en_iyi = None
-        for d0, _ in dol:
-            kume = [i for d, i in dol if abs(d - d0) <= 0.04]
-            if en_iyi is None or len(kume) > len(en_iyi):
-                en_iyi = kume
-        if en_iyi and 3 <= len(en_iyi) < len(aday):
+    # Bu yüzden aday sayısı dördü aşarsa, yarıçapı en tutarlı olan dörtlü
+    # seçilir: her aday için "yarıçapı ona en yakın dört aday"ın yarıçap
+    # yayılımına bakılır, en dar yayılımlı dörtlü kazanır. Halka yayları
+    # F'lerden farklı yarıçaplarda oturduğu için bu elemeden geçemez.
+    if len(aday) > 4:
+        en_iyi_dortlu, en_dar = None, float("inf")
+        for merkez in aday:
+            yakin = sorted(aday, key=lambda a: abs(a[3] - merkez[3]))[:4]
+            if len(yakin) < 4:
+                continue
+            rr = [a[3] for a in yakin]
+            yayilim = max(rr) - min(rr)
+            if yayilim < en_dar:
+                en_dar, en_iyi_dortlu = yayilim, yakin
+        if en_iyi_dortlu is not None:
+            atilan = len(aday) - 4
+            aday = en_iyi_dortlu
             res.messages.append(
-                f"{len(aday) - len(en_iyi)} aday doluluk uyumsuzluğundan "
-                "elendi (F değil, muhtemelen halka parçası).")
-            aday = [aday[i] for i in en_iyi]
+                f"{atilan} aday yarıçap tutarsızlığından elendi "
+                "(F'ler merkezden eşit uzaklıktadır).")
     aday = aday[:4]
 
     for alan, x, y, r, _bw, _bh in aday:
@@ -169,129 +170,120 @@ def find_f_markers(img: np.ndarray,
     return res
 
 
-def _rotate(pts: np.ndarray, deg: float) -> np.ndarray:
-    th = math.radians(deg)
-    c, s = math.cos(th), math.sin(th)
-    return pts @ np.array([[c, -s], [s, c]], dtype=float).T
-
-
-def match_f_markers(gt: FMarkers, det: FMarkers) -> FMatch:
+def _f_templates(img: np.ndarray, marker: FMarkers, half: int = 45):
     """
-    GT ve dedektör F'lerini eşleyip roll + ayna + ölçek çıkarır.
+    DÖRT F'nin HER BİRİNİ ayrı şablon olarak keser.
 
-    Merkeze göre normalize edilmiş nokta bulutları karşılaştırılır. Ölçek,
-    ortalama yarıçap oranından; roll, dönme taraması ile bulunur. Ayna
-    varyantı ayrı bir aday olarak taranır — F asimetrik olduğu için
-    aynalanmış hâli hiçbir dönmede aslına oturmaz, dolayısıyla iki
-    varyanttan biri belirgin biçimde daha iyi uyar ve AYNA KARARI BURADAN
-    ÇIKAR.
+    NEDEN TEK ŞABLON YETMEZ. Desen üreteci F'leri 0°/90°/45°/270°
+    dönmeleriyle koyar; üçüncüsü 45° eğiktir ve simetriyi kıran tek
+    işaret odur. Tek şablon dört F'ye de oturtulunca, şablon kendi
+    dönme belirsizliğiyle yanlış F'ye kilitlenebiliyor. Ölçüldü — tek
+    şablonla GT imzaları 270.1 / 225.3 / 45.1 / 224.8 çıkarken aynı
+    harf hem ac=90 hem ac=270 verebiliyordu, yani hangi F'nin hangisi
+    olduğu ayırt edilemiyordu.
 
-    Dönme taraması 0.25° adımla yapılır: F'ler merkezden ~300-400 px
-    uzakta olduğu için 0.25° ≈ 1.5 px'lik bir kaymaya karşılık gelir,
-    yani eşleme kararını değiştirmeyecek kadar ince.
-    """
-    res = FMatch()
-    if not gt.ok or not det.ok:
-        res.messages.append("F eşlemesi yapılamadı: işaretler eksik.")
-        return res
-    if len(gt.points) < 3 or len(det.points) < 3:
-        res.messages.append("F eşlemesi için en az 3 işaret gerekir.")
-        return res
+    Dört ayrı şablonla her F KİMLİĞİYLE eşlenir: i numaralı GT şablonu
+    yalnızca ona karşılık gelen dedektör F'sine oturur.
 
-    g = np.array(gt.points, dtype=float) - np.array(gt.center, dtype=float)
-    d = np.array(det.points, dtype=float) - np.array(det.center, dtype=float)
-
-    rg = np.hypot(g[:, 0], g[:, 1]).mean()
-    rd = np.hypot(d[:, 0], d[:, 1]).mean()
-    if rg <= 1e-6:
-        res.messages.append("F eşlemesi yapılamadı: GT yarıçapları sıfır.")
-        return res
-    olcek = rd / rg
-    gs = g * olcek                      # GT'yi dedektör ölçeğine getir
-
-    en_iyi = None                        # (hata, roll, ayna, eşleşmeler)
-    for ayna in (False, True):
-        # Ayna, dedektör görüntüsünün yatay çevrilmiş hâline karşılık gelir;
-        # nokta uzayında x işaretini çevirmek aynı şeydir.
-        dd = d.copy()
-        if ayna:
-            dd[:, 0] = -dd[:, 0]
-        for roll in np.arange(0.0, 360.0, 0.25):
-            gr = _rotate(gs, roll)
-            # Her dedektör noktasını en yakın GT noktasına ata (greedy);
-            # F'ler ~90° aralıklı olduğu için karışma riski düşüktür.
-            kullanildi = set()
-            toplam = 0.0
-            ciftler = []
-            for j, p in enumerate(dd):
-                mesafeler = [(np.hypot(*(p - gr[i])), i)
-                             for i in range(len(gr)) if i not in kullanildi]
-                if not mesafeler:
-                    break
-                m, i = min(mesafeler)
-                kullanildi.add(i)
-                toplam += m * m
-                ciftler.append((i, j))
-            if not ciftler:
-                continue
-            hata = math.sqrt(toplam / len(ciftler))
-            if en_iyi is None or hata < en_iyi[0]:
-                en_iyi = (hata, float(roll), bool(ayna), ciftler)
-
-    if en_iyi is None:
-        res.messages.append("F eşlemesi çözülemedi.")
-        return res
-
-    hata, roll, ayna, ciftler = en_iyi
-    res.rms_px = hata
-    res.roll_deg = roll % 360.0
-    res.mirrored = ayna
-    res.scale = olcek
-    res.n_matched = len(ciftler)
-    res.pairs = ciftler
-
-    # Kalıntı eşiği: F merkezleri ~1-2 px hassasiyetle bulunur; 4 işaret
-    # üzerinden RMS'in F'ler arası mesafenin (~2*r) yüzde birkaçını aşmaması
-    # beklenir. Aşıyorsa eşleme yanlış dönmeye oturmuş olabilir.
-    esik = max(8.0, 0.05 * rd)
-    if hata > esik:
-        res.messages.append(
-            f"F eşlemesi zayıf (RMS {hata:.1f} px > {esik:.1f} px) — roll ve "
-            "ayna kararı güvenilmez.")
-        return res
-
-    res.ok = True
-    res.mirror_known = True
-    return res
-
-
-
-
-# ---------------------------------------------------------------------------
-# Şekil tabanlı çözüm — asıl kullanılan yol
-# ---------------------------------------------------------------------------
-
-def _f_template(img: np.ndarray, marker: FMarkers, half: int = 45):
-    """
-    F işaretlerinden birini şablon olarak keser (azimutu 45°'ye en yakın olan).
-
-    Şablon F'nin KENDİ ŞEKLİDİR. Yalnızca merkez konumlarını kullanmak
-    yetmez: dört F 90°'lik aralıklarla yerleşiktir, yani nokta kümesi 4 kat
-    simetriktir ve aynalanınca kendine benzer. Bu projede ölçüldü — konum
-    tabanlı ayna ayrımı 8.07 px'e karşı 9.76 px (%17, kararsız).
+    Dönüş: [(patch, azimut), ...] — GT'deki sırayla.
     """
     if not marker.ok or not marker.points:
-        return None
-    i = min(range(len(marker.azimuths)),
-            key=lambda k: abs(((marker.azimuths[k] - 45.0 + 180) % 360) - 180))
-    x, y = int(round(marker.points[i][0])), int(round(marker.points[i][1]))
+        return []
     h, w = img.shape[:2]
-    x0, y0 = max(0, x - half), max(0, y - half)
-    x1, y1 = min(w, x + half), min(h, y + half)
-    t = img[y0:y1, x0:x1]
-    if t.size == 0 or min(t.shape[:2]) < 10:
-        return None
-    return t, marker.azimuths[i]
+    out = []
+    for (x, y), az in zip(marker.points, marker.azimuths):
+        xi, yi = int(round(x)), int(round(y))
+        x0, y0 = max(0, xi - half), max(0, yi - half)
+        x1, y1 = min(w, xi + half), min(h, yi + half)
+        t = img[y0:y1, x0:x1]
+        if t.size == 0 or min(t.shape[:2]) < 10:
+            continue
+        out.append((t, float(az)))
+    return out
+
+
+def _match_identities(det_img: np.ndarray, det: FMarkers,
+                      gt_tmpl: list, olcek: float):
+    """
+    Dedektör F'lerini GT F'lerine BİREBİR eşler ve roll'ü çözer.
+
+    Her (GT şablonu i, dedektör F'si j) çifti için şablon döndürülerek
+    en iyi oturma açısı ve NCC ölçülür. Sonra 4! = 24 permütasyon
+    taranır; her permütasyonda dört çiftin verdiği roll okumalarının
+    ne kadar tutarlı olduğuna bakılır.
+
+    DOĞRU eşlemede dört okuma da aynı roll'ü gösterir; yanlış eşlemede
+    (ör. 90° kaymış atama) eğik F'nin okuması diğerlerinden ayrışır —
+    simetriyi kıran şey tam olarak budur.
+
+    Dönüş: (tutarsızlık_derece, roll_derece, ortalama_ncc)
+    """
+    import itertools
+
+    if not gt_tmpl or not det.ok or len(det.points) < 3:
+        return float("inf"), float("nan"), 0.0
+
+    # Her GT şablonunu dedektör ölçeğine getir.
+    tmpl_s = []
+    for t, az in gt_tmpl:
+        T = (cv2.resize(t, None, fx=olcek, fy=olcek,
+                        interpolation=cv2.INTER_CUBIC)
+             if abs(olcek - 1.0) > 1e-3 else t)
+        tmpl_s.append((T, az))
+
+    n_g, n_d = len(tmpl_s), len(det.points)
+    # skor[i][j] = (oturma açısı, ncc) — GT şablonu i, dedektör F'si j
+    skor = [[None] * n_d for _ in range(n_g)]
+    h, w = det_img.shape[:2]
+    for j, ((px, py), daz) in enumerate(zip(det.points, det.azimuths)):
+        pxi, pyi = int(round(px)), int(round(py))
+        for i, (T, gaz) in enumerate(tmpl_s):
+            yari = int(max(T.shape[:2]) * 0.5) + 15
+            P = det_img[max(0, pyi - yari):min(h, pyi + yari),
+                        max(0, pxi - yari):min(w, pxi + yari)]
+            if P.size == 0 or min(P.shape[:2]) < min(T.shape[:2]):
+                continue
+            ncc, aci = _fit_angle(P, T)
+            if math.isfinite(aci):
+                skor[i][j] = (float(aci), float(ncc))
+
+    en_iyi = (float("inf"), float("nan"), 0.0)
+    idx_g = list(range(n_g))
+    for perm in itertools.permutations(range(n_d), min(n_g, n_d)):
+        okuma, nccler = [], []
+        for i, j in zip(idx_g, perm):
+            if skor[i][j] is None:
+                continue
+            aci, ncc = skor[i][j]
+            gaz = tmpl_s[i][1]
+            daz = det.azimuths[j]
+            # İki bağımsız roll okuması; doğru eşlemede ikisi de aynıdır.
+            #
+            # İŞARET. _fit_angle, ŞABLONU döndürüp patch'e oturtur; yani
+            # bulduğu açı görüntünün dönmesinin TERSİDİR. Azimut ise
+            # görüntüyle aynı yönde artar. Ölçüldü (roll=30 deseni):
+            # doğru çiftlerde ac=330 iken azimut farkı 30 — yani
+            # -ac = 30 ile birebir örtüşüyor (hata 0.2°).
+            r_sekil = (-aci) % 360.0
+            r_azimut = (daz - gaz) % 360.0
+            okuma.append((r_sekil, r_azimut))
+            nccler.append(ncc)
+        if len(okuma) < 3:
+            continue
+        # Bu permütasyon altında en tutarlı roll'ü ara.
+        def _tutarsizlik(roll):
+            e = []
+            for r_s, r_a in okuma:
+                f_s = abs(((r_s - roll + 180.0) % 360.0) - 180.0)
+                f_a = abs(((r_a - roll + 180.0) % 360.0) - 180.0)
+                e.append(max(f_s, f_a))
+            return float(np.median(e))
+        kaba = min(np.arange(0.0, 360.0, 1.0), key=_tutarsizlik)
+        ince = min(np.arange(kaba - 1.0, kaba + 1.0, 0.1), key=_tutarsizlik)
+        t = _tutarsizlik(ince)
+        if t < en_iyi[0]:
+            en_iyi = (float(t), float(ince % 360.0), float(np.mean(nccler)))
+    return en_iyi
 
 
 def _fit_angle(patch: np.ndarray, tmpl: np.ndarray, step: float = 2.0):
@@ -307,24 +299,6 @@ def _fit_angle(patch: np.ndarray, tmpl: np.ndarray, step: float = 2.0):
         if v > iyi:
             iyi, iyi_aci = v, float(aci)
     return iyi, iyi_aci
-
-
-def _measure_angles(img: np.ndarray, marker: FMarkers,
-                    tmpl: np.ndarray) -> list:
-    """Her F için (azimut, şablon oturma açısı, NCC) ölçer."""
-    yari = int(max(tmpl.shape[:2]) * 0.5) + 15
-    h, w = img.shape[:2]
-    out = []
-    for (px, py), az in zip(marker.points, marker.azimuths):
-        px, py = int(round(px)), int(round(py))
-        P = img[max(0, py - yari):min(h, py + yari),
-                max(0, px - yari):min(w, px + yari)]
-        if P.size == 0 or min(P.shape[:2]) < min(tmpl.shape[:2]):
-            continue
-        ncc, aci = _fit_angle(P, tmpl)
-        if math.isfinite(aci):
-            out.append((az, aci, ncc))
-    return out
 
 
 def solve_roll_and_mirror(gt_img: np.ndarray, det_img: np.ndarray,
@@ -365,108 +339,55 @@ def solve_roll_and_mirror(gt_img: np.ndarray, det_img: np.ndarray,
         res.messages.append("F işaretleri bulunamadı — roll/ayna çözülemedi.")
         return res
 
-    tg = _f_template(gt_img, g)
-    if tg is None:
-        res.messages.append("F şablonu kesilemedi.")
-        return res
-    tmpl, _ = tg
-
-    # GT referansı: şablonun GT'nin KENDİ F'lerine oturma açıları.
-    gt_ref = _measure_angles(gt_img, g, tmpl)
-    if len(gt_ref) < 3:
-        res.messages.append("GT'de F açıları ölçülemedi.")
+    # Dört GT F'sinin HER BİRİ ayrı şablon. Tek şablon, 45° eğik F'yi
+    # diğerlerinden ayırt edemiyordu (bkz. _f_templates).
+    gt_tmpl = _f_templates(gt_img, g)
+    if len(gt_tmpl) < 3:
+        res.messages.append("GT'de F şablonları kesilemedi.")
         return res
 
-    # Ölçek ve dedektör ölçümü.
     rg = float(np.mean(g.radii)) if g.radii else 0.0
     rd = float(np.mean(d.radii)) if d.radii else 0.0
     olcek = (float(scale_hint) if (scale_hint and scale_hint > 0)
              else (rd / rg if rg > 1e-6 else 1.0))
     res.scale = olcek
-    T = cv2.resize(tmpl, None, fx=olcek, fy=olcek,
-                   interpolation=cv2.INTER_CUBIC)
-    det_olcum = _measure_angles(det_img, d, T)
-    if len(det_olcum) < 3:
-        res.messages.append(
-            f"Dedektörde yalnızca {len(det_olcum)} F ölçülebildi.")
+
+    # AYNA HİPOTEZİ GÖRÜNTÜ ÜZERİNDE denenir, nokta uzayında değil.
+    #
+    # Eski sürüm ayna için yalnızca azimut ve açı işaretlerini çeviriyordu.
+    # Ama ayna F'nin ŞEKLİNİ de çevirir; şablon aynalanmadığı sürece
+    # aynalanmış bir F'ye hiçbir dönmede tam oturmaz. Bu yüzden dedektör
+    # görüntüsünün kendisi yatay çevrilip aynı kimlik eşlemesi koşulur ve
+    # iki hipotezin tutarsızlıkları karşılaştırılır.
+    def _hipotez(ayna: bool):
+        if not ayna:
+            return _match_identities(det_img, d, gt_tmpl, olcek)
+        di = cv2.flip(det_img, 1)
+        dm = find_f_markers(di, None if det_center is None
+                            else (det_img.shape[1] - 1 - det_center[0],
+                                  det_center[1]))
+        if not dm.ok:
+            return float("inf"), float("nan"), 0.0
+        return _match_identities(di, dm, gt_tmpl, olcek)
+
+    t_duz, roll_duz, ncc_duz = _hipotez(False)
+    t_ayn, roll_ayn, ncc_ayn = _hipotez(True)
+
+    if not (math.isfinite(t_duz) or math.isfinite(t_ayn)):
+        res.messages.append("F kimlik eşlemesi kurulamadı.")
         return res
-
-    ncc_ort = float(np.mean([n for _, _, n in det_olcum]))
-
-    def _degerlendir(ayna: bool):
-        """
-        Bir hipotez altında en iyi roll'ü ve ortalama tutarsızlığını bulur.
-
-        Her F için İKİ bağımsız roll okuması vardır:
-
-            r_şekil  = şablonun oturma açısı farkı  (F'nin kendi dönüşü)
-            r_azimut = F'nin merkeze göre yön farkı (F'nin konumu)
-
-        Doğru hipotez ve doğru eşleme altında ikisi AYNI çıkar. Ölçülen
-        gerçek çiftte fark çarpıcıydı:
-
-            düz hipotez  : tüm çiftlerde 87-93° tutarsızlık  -> hepsi yanlış
-            ayna hipotezi: dört çiftte 1.2-2.8°              -> doğru
-
-        Ayna, azimutu VE şekil açısını birlikte ters çevirir; bu yüzden
-        yalnızca biri değil ikisi birden dönüştürülür.
-
-        EŞLEME BİREBİR OLMALI. İki dedektör F'si aynı GT F'sine atanırsa
-        "hepsi aynı yere oturdu" gibi sahte bir çözüm doğar. Roll taranır,
-        her aday roll için birebir atama kurulur ve toplam hata ölçülür.
-        """
-        olc = []
-        for daz, dac, _ in det_olcum:
-            az = (-daz) % 360.0 if ayna else daz
-            ac = (-dac) % 360.0 if ayna else dac
-            olc.append((az, ac))
-
-        def _hata(roll):
-            """
-            Bu roll için ortalama tutarsızlık.
-
-            Her dedektör F'si, KENDİSİNE EN İYİ UYAN GT F'sine atanır —
-            birebir kısıt YOK. Kısıt koymak burada zarar veriyordu: desende
-            F'ler 180°'lik gruplar hâlinde yerleştirilmiş (ölçüldü: az-açı
-            değerleri {45, 225} iki kümede toplanıyor), bu yüzden birden çok
-            dedektör F'si aynı GT F'sine haklı olarak uyabilir. Zorla farklı
-            GT F'lerine dağıtmak doğru eşlemeyi bozuyordu (tutarsızlık elle
-            hesaplanan 1.2-2.8° yerine 30.7° çıkıyordu).
-
-            Sahte çözüm riski, ŞEKİL ve AZİMUT'un İKİSİNİ birden zorunlu
-            kılmakla önlenir: yanlış bir roll altında biri tutsa bile
-            diğeri tutmaz, ve max() ikisinin kötüsünü alır.
-            """
-            hatalar = []
-            for az, ac in olc:
-                en = None
-                for gaz, gac, _ in gt_ref:
-                    f_az = abs(((az - gaz - roll + 180.0) % 360.0) - 180.0)
-                    f_ac = abs(((ac - gac - roll + 180.0) % 360.0) - 180.0)
-                    f = max(f_az, f_ac)
-                    if en is None or f < en:
-                        en = f
-                hatalar.append(en)
-            # MEDYAN, ortalama değil. Bir F kırpılmış, gölgede kalmış ya da
-            # halkaya değmiş olabilir; ortalama o tek aykırıyı tüm karara
-            # yayar. Ölçülen çiftte hatalar [0.9, 0.8, 89.2] idi —
-            # ortalaması 30.3° (kararsız), medyanı 0.9° (net).
-            return float(np.median(hatalar))
-
-        kaba = min(np.arange(0.0, 360.0, 1.0), key=_hata)
-        ince = min(np.arange(kaba - 1.0, kaba + 1.0, 0.1), key=_hata)
-        return float(_hata(ince)), float(ince % 360.0)
-
-    t_duz, roll_duz = _degerlendir(False)
-    t_ayn, roll_ayn = _degerlendir(True)
 
     res.mirrored = t_ayn < t_duz
     kazanan_t = min(t_duz, t_ayn)
     res.roll_deg = (roll_ayn if res.mirrored else roll_duz) % 360.0
-    res.n_matched = len(det_olcum)
+    ncc_ort = ncc_ayn if res.mirrored else ncc_duz
+    res.n_matched = len(d.points)
     res.rms_px = kazanan_t
 
-    ayrim = (max(t_duz, t_ayn) / kazanan_t) if kazanan_t > 1e-6 else float("inf")
+    # Ayna kararı iki hipotezin AYRIMINA dayanır. Doğru hipotez tutarlı bir
+    # roll verir, yanlışı vermez; oran ne kadar büyükse karar o kadar net.
+    ayrim = ((max(t_duz, t_ayn) / kazanan_t)
+             if kazanan_t > 1e-6 else float("inf"))
     res.mirror_known = bool(ayrim > 1.5 and ncc_ort > 0.5)
     if not res.mirror_known:
         res.messages.append(
@@ -484,7 +405,6 @@ def solve_roll_and_mirror(gt_img: np.ndarray, det_img: np.ndarray,
 
     res.ok = True
     res.messages.append(
-        f"Roll ve ayna {len(det_olcum)} F işaretinden çözüldü "
-        f"(NCC {ncc_ort:.2f}, tutarsızlık {kazanan_t:.1f}°, "
-        f"dağılım ±{res.rms_px:.1f}°).")
+        f"Roll ve ayna {res.n_matched} F işaretinden çözüldü "
+        f"(NCC {ncc_ort:.2f}, tutarsızlık {kazanan_t:.1f}°).")
     return res

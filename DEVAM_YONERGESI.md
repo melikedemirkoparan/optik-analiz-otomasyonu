@@ -1465,135 +1465,136 @@ yarıçapsız geri düşüş ve görüntü dairesinin payı bağladığı durum.
 
 ---
 
-## 7K. ROLL'ÜN MOD-90 BELİRSİZLİĞİ: F İŞARETLERİ — YARIM KALDI (2026-08-28)
+## 7K. ROLL'ÜN MOD-90 BELİRSİZLİĞİ ÇÖZÜLDÜ — F İŞARETLERİ (2026-08-31)
 
-> **BURADAN DEVAM EDİLECEK.** `core/f_markers.py` ve `test_f_markers.py`
-> henüz commit edilmemiş çalışmaydı; bu dalla birlikte pushlandı.
-> Test durumu: **12 geçti, 10 kaldı.** Aşağıda iki ayrı kök neden ve
-> ölçülmüş kanıtları var. Teşhis tamamlandı, DÜZELTME YAPILMADI.
+**Durum: TAMAM.** `test_f_markers.py` **24/24 geçiyor**; roll artık
+`mod 90°` değil, **0..360° tek değer**. Diğer beş takım da geçiyor
+(pointing, görüntü dairesi 75, projeksiyon 86, çözücü 123, UI kaynak 52).
 
-### Hatırlatma: çözülmek istenen şey
+### Sorun neydi
 
-7I'de saptandığı gibi eş merkezli halka deseni 90° dönmelerde kendini
-tekrar ediyor, bu yüzden homografiden okunan roll yalnızca `mod 90°`
-biliniyordu (panelde `136.356 (mod 90°)`). Fikir: desendeki dört köşe **F
-harfi** asimetriktir, ne dönme ne ayna simetrisi vardır; onlardan roll
-0..360° tam çözülmeli ve ayna kararı SIFT'e gerek kalmadan verilmeli.
+Eş merkezli halka deseni 90° dönmede kendini tekrarladığı için
+homografiden okunan roll yalnızca `mod 90°` biliniyordu (panelde
+`136.356 (mod 90°)` — 43.6/133.6/223.6/313.6 arasından hangisi olduğu
+belirsizdi). Aynı simetri ayna kararını da SIFT inlier eşiğine bağımlı
+bırakıyordu.
 
-Yöntem, her F için İKİ açı ölçmeye dayanıyor:
+### Anahtar bulgu: desen ZATEN simetriyi kırıyor
 
-    azimut (az) : F'nin desen merkezine göre yönü
-    şekil  (ac) : şablonu o F'ye oturtmak için gereken dönme
+Önce yanlış teşhis edilmişti ("desenin F'leri roll'ü tekleştirmiyor").
+Gerçek desen (`v6_1deg_inverted`) ölçülünce tersi çıktı. Desen üreteci
+`generate_circle_pattern_passive.corner_positions()` şunu yapıyor:
 
-Görüntü yalnızca döndürülmüşse ikisi AYNI miktarda kayar. Bu yüzden
-`az - ac` her F için bir **imza**dır ve iki görüntü arasındaki imza farkı
-doğrudan roll'ü verir.
+    rots = [0.0, 90.0, 45.0, 270.0]      # azimutlar 45/135/225/315
 
-### KÖK NEDEN 1 — doluluk elemesi GERÇEK bir F'yi atıyor
+Üçüncü F **bilerek 45° eğik**. Üreticinin kendi yorumu: *"Son F 45 derece
+verilerek simetri kırılır -- hiçbir dönme/aynalama kombinasyonu paterni
+kendine götürmez."* Yani roll'ü tekleştiren bilginin TAMAMI o eğik F'de.
 
-`find_f_markers()` içindeki doluluk (alan / çevre kutusu) elemesi, halka
-yayını F'den ayırmak için eklenmişti. Ama F'ler **döndükçe doluluk oranı
-değişiyor**: aynı harf, kutusu eğik durduğunda farklı bir oran veriyor.
+Ayrıca `f_clear` parametresi çember yaylarını F çevresinde kesiyor, yani
+**F'ler halkalara değmiyor** — gerçek desende dördü de tertemiz, ayrı
+bağlantılı bileşen olarak çıkıyor. Yeni bir ground truth üretmek
+gerekmedi; sorun kodda ve testteydi.
 
-Sentetik desende ölçüldü (roll=0, aday listesi zaten TAM 4 gerçek F):
+### Kök neden 1 — doluluk elemesi, simetriyi kıran F'yi atıyordu
 
-| alan | bw×bh | doluluk |
-|---|---|---|
-| 198 | 24×37 | **0.223**  ← ±0.04 bandının dışında kaldı, ELENDİ |
-| 188 | 21×33 | 0.271 |
-| 185 | 33×21 | 0.267 |
-| 185 | 33×21 | 0.267 |
+`find_f_markers()` içindeki doluluk (alan/çevre kutusu) filtresi, yorumunda
+"gerçek desende bir halka parçası 712 piksel alanla F'lerin 747'sine yakındı"
+diyordu. **O 712 bir halka yayı değil, dördüncü F'nin kendisiydi** — azimutu
+226.8, tam olması gereken yer. Gerçek desende ölçüldü:
 
-Yani çevre-kutusu + alan elemesi halka yayını zaten tamamen temizlemişti
-(4 aday, hepsi F). Doluluk elemesi bu noktada **yalnızca zarar veriyor**:
-her koşuda dört F'den birini "halka parçası" sanıp atıyor.
+| azimut | alan | kutu | doluluk |
+|---|---|---|---|
+| 45.2 | 747 | 46×68 | 0.239 |
+| 135.1 | 747 | 68×46 | 0.239 |
+| **226.8** | **712** | **78×49** | **0.186**  ← 45° eğik F |
+| 315.2 | 747 | 68×46 | 0.239 |
 
-Ölçülen sonuç — roll'e göre bulunan F sayısı:
+45° eğik çizim piksel ızgarasında farklı bir kutuya oturuyor. Dolayısıyla
+"alanı/dolulukları benzeyenleri tut" biçimindeki HER eleme, tam da simetriyi
+kıran F'yi atar. Filtre her koşuda dört F'den birini kaybediyordu.
 
-    roll=  0 -> 3 F   (1 elendi)
-    roll= 30 -> 3 F   (1 elendi)
-    roll=134 -> 3 F   (1 elendi)
-    roll=225 -> 4 F   (eleme tesadüfen tetiklenmedi)
-    roll=310 -> 4 F
+**Düzeltme:** doluluk ve alan-kümesi elemeleri kaldırıldı. Yerine
+**dönme değişmezi** bir ölçüt kondu: F'ler merkezden eşit uzaklıktadır, bu
+yüzden fazla aday varsa yarıçapı en tutarlı dörtlü seçilir. Şekle dayanan
+her ölçüt dönmeyle değişir; yarıçap değişmez.
 
-Testlerdeki `1 aday doluluk uyumsuzluğundan elendi (F değil, muhtemelen
-halka parçası)` mesajının kaynağı budur; [2] [4] [5] ve [3]'ün bir kısmı
-bu tek satır yüzünden kalıyor.
+Ölçüldü: gerçek desende kutu+alan+yarıçap elemesinden **tam 4 aday**
+geçiyor, hiç yay sızmıyor — ek şekil filtresine zaten gerek yoktu.
 
-**Doğrulama:** doluluk elemesi devre dışı bırakılıp geri kalan her şey
-aynı tutulduğunda:
+### Kök neden 2 — tek şablon F'leri kimliğiyle ayırt edemiyordu
 
-    roll   0 ->   0.00  (hata 0.00)   OK
-    roll 134 -> 136.00  (hata 2.00)   OK
-    roll 310 -> 315.20  (hata 5.20)   OK
-    ayna testi: düz  ok=True mirrored=False known=True   OK
-                ayna ok=True mirrored=True  known=True   OK
-    roll  30 -> ÇÖZÜLEMEDİ  (tutarsızlık 29.0°)
-    roll 225 -> ÇÖZÜLEMEDİ  (tutarsızlık 46.4°)
+`_f_template()` tek bir F'yi şablon kesip dördüne de oturtuyordu. Ama
+şablon kendi dönme belirsizliğiyle yanlış F'ye kilitlenebiliyor: aynı harf
+hem `ac=90` hem `ac=270` verebiliyordu.
 
-Yani ayna kararı ve rollerin bir kısmı DÜZELIYOR — ama ikisi hâlâ
-kalıyor. Demek ki ikinci bir sorun var.
+**Düzeltme:** `_f_templates()` **dört F'nin her birini ayrı şablon** olarak
+keser, `_match_identities()` ise 4! = 24 permütasyonu tarayıp dedektör
+F'lerini GT F'lerine **birebir** atar. Doğru eşlemede dört okuma da aynı
+roll'ü verir; yanlış eşlemede eğik F ayrışır — simetriyi kıran mekanizma
+tam olarak budur.
 
-### KÖK NEDEN 2 — desenin F'leri roll'ü TEKLEŞTİRMİYOR
+### Kök neden 3 — işaret hatası (asıl tıkanıklık)
 
-Asıl bulgu bu ve tasarımı ilgilendiriyor. `az - ca` imzası bir görüntü
-İÇİNDE mükemmel tutarlı çıkıyor:
+Kimlik eşlemesi kurulduktan sonra bile tutarsızlık ısrarla ~45°'de
+takılıyordu. Sebep bir işaret kuralıydı: `_fit_angle` ŞABLONU döndürüp
+patch'e oturtur, yani bulduğu açı görüntünün dönmesinin **TERSİDİR**.
+Azimut ise görüntüyle aynı yönde artar.
 
-    GT        : imzalar 44.99 / 46.99 / 46.90     (çok sıkı)
-    roll=30   : imzalar 104.88 / 104.83 / 105.07  (çok sıkı)
-    roll=225  : imzalar 137.86 / 135.88 / 136.08  (+ bir aykırı 272.94)
+Ölçüldü (roll=30 deseni): doğru çiftlerde `ac=330` iken azimut farkı `30` —
+yani `-ac` ile azimut farkı **0.2° hatayla** örtüşüyor. `r_sekil` artık
+`(-aci) % 360`. Bu tek karakterlik düzeltme 14/23'ü 23/24'e çıkardı.
 
-Ama imzanın KAYMASI uygulanan roll'e eşit değil:
+### Ayna kararı — testin beklentisi yanlışmış
 
-    roll=30  : 105 - 47 = **58°**   (30 bekleniyordu)
-    roll=225 : 136 - 47 = **89°**   (225 bekleniyordu)
+Ayna hipotezi artık **görüntü üzerinde** deneniyor (dedektör görüntüsü
+gerçekten çevrilip aynı kimlik eşlemesi koşuluyor), nokta uzayında işaret
+çevirerek değil: ayna F'nin ŞEKLİNİ de çevirir, şablon aynalanmadıkça
+aynalanmış F'ye hiçbir dönmede oturmaz.
 
-Sebep, test deseninin (ve gerçek desenin) F açılarında. `desen_uret`
-F'leri gerçek desenden ölçülen açılarla çiziyor — azimut 45/135/225/315
-için kendi açıları sırasıyla 0°, 270°, 316°, 90°. Her F'nin imzası:
+Gerçek Hydra+OLED çiftinde sonuç tartışmasız:
 
-| azimut | kendi açısı | imza (az−ac) |
-|---|---|---|
-| 45  | 0   | **45** |
-| 135 | 270 | **225** |
-| 225 | 316 | **269** |
-| 315 | 90  | **225** |
+    düz  hipotez : tutarsızlık  0.74°, NCC 0.977   -> KABUL
+    ayna hipotezi: tutarsızlık 45.36°, NCC 0.659   -> RED
+    ayrım: 61 kat
 
-**İki F'nin imzası birebir aynı (225).** Yani dört F, birbirinden ayırt
-edilebilir dört işaret DEĞİL — üçü pratik olarak 90° dönmüş kopyalar gibi
-davranıyor. Simetriyi kıran tek işaret azimut 225'teki F (imza 269).
+Test eskiden burada "ayna EVET" bekliyordu; o beklenti yanlış eşleme yapan
+eski çözücünün çıktısına göre yazılmıştı. Bağımsız bir kontrol de aynı yönü
+gösteriyor: F merkezlerinin **işaretli alanı (chirality)** GT'de +430775,
+dedektörde +681105 — ikisi de pozitif, dizilim yönü aynı, **ayna yok**. Bu
+ölçüt şablon eşleşmesinden tamamen bağımsızdır, bu yüzden hakem olarak
+kullanılabilir. Test beklentisi buna göre düzeltildi.
 
-Ve KÖK NEDEN 1'in attığı F çoğu zaman tam da o. İki hata birbirini
-besliyor: eleme simetriyi kıran tek F'yi atınca, geriye kalan üç F 90°
-belirsizliğini aynen koruyor ve şablon eşleşmesi yanlış F'ye oturuyor.
+### Sonuçlar
 
-### Ne yapılmalı (sıra önemli)
+Sentetik testte roll geri kazanımı (24/24):
 
-1. **`find_f_markers` içindeki doluluk elemesini kaldır** (satır ~140-160,
-   `# DOLULUK ELEMESİ` bloğu). Çevre kutusu + alan + en kalabalık alan
-   kümesi zaten yetiyor; doluluk dönmeye duyarlı olduğu için ölçüt olamaz.
-   Halka yayı sızarsa doğru ölçüt **dairesellik/uzunluk-genişlik oranı**
-   olur, doluluk değil.
-2. **Şablon eşleşmesini F KİMLİĞİNE bağla.** Şu an tek şablon her F'ye
-   oturtuluyor ve NCC en iyi hangi dönmede ise o seçiliyor; F'ler farklı
-   açılarda çizildiği için bu yanlış kimliğe oturabiliyor. Dört F'nin
-   dördü için ayrı şablon kesilip GT'deki dört imza bir küme olarak
-   eşlenmeli (birebir atama, 4! = 24 permütasyon; ucuz).
-3. **Gerçek desenin F açılarını doğrula.** İmza tablosundaki 225-225
-   çakışması gerçek desende de varsa, roll TASARIM GEREĞİ tekleşmiyor
-   demektir. O zaman 7I'deki not geçerli kalır: *desenin kendisi
-   değişmeli* — dört F'den birine ikinci bir işaret eklemek yeter.
-   `generate_circle_pattern*.py` bunu üretiyor, orada düzeltilebilir.
-4. Adım 1+2'den sonra `python3 test_f_markers.py` 22/22 olmalı; sonra
-   `core/pipeline.py` + `gui/main_window.py` içindeki `(mod 90°)`
-   gösterimi tam açıya çevrilmeli.
+    roll   0 ->   0.0   (hata 0.0°)
+    roll 134 -> 133.9   (hata 0.1°)
+    roll 225 -> 224.6   (hata 0.4°)
+    roll 310 -> 310.0   (hata 0.0°)
+    44° ile 134° AYIRT EDİLİYOR: 44.1 vs 133.9 (fark 89.8°)
+    ölçek 1.4x/1.8x ve kaçık merkez: hata 0.0-1.0°
 
-### Gerçek ölçüm ne diyor
+Gerçek çift: roll **223.30°**, homografinin mod-90 değeriyle tutarlı
+(223.30 mod 90 = 43.30), NCC 0.98, tutarsızlık 0.74°, ayna YOK.
 
-[7] bloğu (Hydra + OLED gerçek çifti) ZATEN GEÇİYOR: roll 134.80°,
-homografiyle mod-90 tutarlı (44.80°), ayna EVET, F dağılımı ±0.88°.
-Yani yöntem gerçek veride çalışıyor; kalan 10 hata sentetik testin
-zorladığı köşe durumlarında ve yukarıdaki iki kök nedenden geliyor.
+### Testteki sentetik desen de düzeltildi
+
+`test_f_markers.py` F açılarını `(0, 270, 316, 90)` diye kodluyordu; gerçek
+üreteçte `(0, 90, 45, 270)`. Eski dizilimde iki F'nin imzası çakışıyordu,
+yani test **gerçekte olmayan bir belirsizliği** ölçüp çözücüyü haksız yere
+suçluyordu. Sentetik desen gerçeğe uymazsa test bir şey kanıtlamaz.
+
+### Sırada ne var
+
+Roll artık tek değer olarak çözülüyor ama **panele bağlanmadı**.
+`core/pipeline.py` ve `gui/main_window.py` hâlâ `(mod 90°)` gösteriyor;
+`solve_roll_and_mirror` sonucu oraya taşınmalı ve 7I'deki "desen 90°
+dönmelerde kendini tekrarlıyor" notu kaldırılmalı. Ayna kararı da artık
+SIFT inlier eşiğine gerek kalmadan buradan alınabilir.
+
+---
 
 ## 8. OLASI SONRAKİ ADIMLAR (fikir — kullanıcı istemedi)
 

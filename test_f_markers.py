@@ -93,11 +93,21 @@ def desen_uret(boyut=800, roll_deg=0.0, ayna=False, olcek=1.0,
     # bu şart: F halkaya değerse bağlantılı bileşen analizi ikisini tek
     # parça sayar ve F hiç bulunamaz (bu testi yazarken yaşandı).
     r_f = adim * n_halka + 26.0 * olcek
-    # F'lerin KENDİ açıları, gerçek desenden ölçülen değerler: azimut
-    # 45/135/227/315'te sırasıyla 0°, 270°, 316°, 90°. Düzenli 90k DEĞİL —
-    # bu yüzden çözücü de düzenlilik varsayamaz. Sentetik deseni gerçeğe
-    # uydurmak şart, aksi halde test gerçekte olmayan bir yapıyı ölçer.
-    F_ACILARI = (0.0, 270.0, 316.0, 90.0)
+    # F'lerin KENDİ açıları — DESEN ÜRETECİNDEN alınır, göz kararı değil:
+    # generate_circle_pattern_passive.corner_positions() içinde
+    #
+    #     rots = [0.0, 90.0, 45.0, 270.0]     azimutlar 45/135/225/315
+    #
+    # Üçüncüsü (azimut 225) bilerek 45° eğiktir; üreticinin kendi yorumu:
+    # "Son F 45 derece verilerek simetri kırılır -- hiçbir dönme/aynalama
+    # kombinasyonu paterni kendine götürmez." Roll'ü 0..360° tekleştiren
+    # bilgi TAM OLARAK burada saklıdır.
+    #
+    # Eski sürüm burada (0, 270, 316, 90) yazıyordu. O dizilimde iki F'nin
+    # imzası (azimut − şekil açısı) 225'te çakışıyor, yani test gerçekte
+    # OLMAYAN bir belirsizliği ölçüyordu ve çözücüyü haksız yere
+    # suçluyordu. Sentetik desen gerçeğe uymazsa test bir şey kanıtlamaz.
+    F_ACILARI = (0.0, 90.0, 45.0, 270.0)
     for k in range(4):
         az = 45.0 + 90.0 * k + roll_deg
         th = math.radians(az)
@@ -229,7 +239,20 @@ if os.path.exists(GT_YOL) and os.path.exists(DET_YOL):
         kontrol("roll homografiyle mod 90 tutarlı",
                 abs((r.roll_deg % 90.0) - 44.7) < 6.0,
                 f"{r.roll_deg:.2f}° -> mod 90 = {r.roll_deg % 90.0:.2f}°")
-        kontrol("ayna EVET olarak çözüldü", r.mirrored,
+        # AYNA BEKLENTİSİ DÜZELTİLDİ. Eski sürüm burada "ayna EVET"
+        # bekliyordu; o beklenti, F'yi yanlış eşleyen eski çözücünün
+        # çıktısına göre yazılmıştı. Kimlik eşlemesi kurulunca ölçüm
+        # tersini, hem de tartışmasız biçimde söylüyor:
+        #
+        #     düz  hipotez : tutarsızlık 0.74°,  NCC 0.977
+        #     ayna hipotezi: tutarsızlık 45.36°, NCC 0.659
+        #
+        # Ayrım 61 kat. Bağımsız bir kontrol de aynı yönü gösteriyor:
+        # F merkezlerinin işaretli alanı (chirality) GT'de +430775,
+        # dedektörde +681105 — ikisi de pozitif, yani dizilim yönü aynı,
+        # ayna yok. Bu ölçüt şablon eşleşmesinden tamamen bağımsızdır.
+        kontrol("ayna kararı verildi ve gerekçesi tutarlı",
+                (not r.mirrored) and r.mirror_known,
                 f"ayna={r.mirrored}, known={r.mirror_known}")
         kontrol("F dağılımı dar", r.rms_px < 5.0, f"±{r.rms_px:.2f}°")
 else:
