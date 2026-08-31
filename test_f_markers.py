@@ -259,6 +259,93 @@ else:
     print("   (gerçek dosyalar yok — atlandı)")
 
 
+# ---------------------------------------------------------------------------
+print("\n[8] DÖNDÜRME TESTİ — pipeline'ın bağlanma şartı")
+# Bu testin varlık sebebi, core/pipeline.py'de f_markers'ı DEVRE DIŞI
+# bırakan yorumdur:
+#
+#   "Aynı dedektör görüntüsü bilinen açılarla döndürülüp yöntem tekrar
+#    koşuldu. 8 dönmeden 4'ü yanlış çıktı ve hatalar 90'ın katları
+#    civarındaydı (90.1°, 82.5°, 128.6°) — yani F'ler bulunuyor ama hangi
+#    F'nin hangisine karşılık geldiği yanlış çözülüyor. Ayna kararı da
+#    dönmeyle değişiyordu, oysa dönme aynayı etkilemez.
+#    ... Düzeltilip döndürme testinin 8/8'i geçince yeniden bağlanacak."
+#
+# Tek bir koşuda doğru çıkmak yöntemin çalıştığını göstermez; asıl sınav
+# budur. Kimlik eşlemesi + işaret düzeltmesinden sonra 8/8 geçiyor
+# (hatalar 0.0-0.4°, ayna sekiz dönmede de sabit).
+if os.path.exists(GT_YOL) and os.path.exists(DET_YOL):
+    from core.image_analysis import load_image_gray as _yukle
+    _g = _yukle(GT_YOL)
+    _d = _yukle(DET_YOL)
+    _temel = fm.solve_roll_and_mirror(_g, _d)
+    if not _temel.ok:
+        kontrol("döndürme testi için temel ölçüm", False,
+                "; ".join(_temel.messages)[:70])
+    else:
+        _h, _w = _d.shape[:2]
+        _c = (_w / 2.0, _h / 2.0)
+        _gecen = 0
+        for _aci in (0, 45, 90, 135, 180, 225, 270, 315):
+            _M = cv2.getRotationMatrix2D(_c, _aci, 1.0)
+            _dr = cv2.warpAffine(_d, _M, (_w, _h), flags=cv2.INTER_CUBIC,
+                                 borderValue=int(_d[0, 0]))
+            _r = fm.solve_roll_and_mirror(_g, _dr)
+            if not _r.ok:
+                continue
+            # warpAffine saat yönünün TERSİNE döndürür, roll o kadar azalır.
+            _bek = (_temel.roll_deg - _aci) % 360.0
+            _hata = abs(((_r.roll_deg - _bek + 180.0) % 360.0) - 180.0)
+            # Ayna dönmeden ETKİLENMEZ; değişiyorsa kimlik eşlemesi kaymıştır.
+            if _hata < 8.0 and _r.mirrored == _temel.mirrored:
+                _gecen += 1
+        kontrol("8 dönmenin 8'i de doğru (pipeline şartı)", _gecen == 8,
+                f"{_gecen}/8")
+else:
+    print("   (gerçek dosyalar yok — atlandı)")
+
+
+# ---------------------------------------------------------------------------
+print("\n[9] PANELE BAĞLANTI — pipeline ve arayüz")
+# f_markers'ı düzeltmek tek başına yetmez: sonucu panele TAŞIMAZSA
+# kullanıcı hâlâ "(mod 90°)" görür. Bu blok bağlantının kopmadığını
+# doğrular; kaynak metin üzerinden bakar, çünkü asıl risk birinin
+# pipeline'daki çağrıyı kaldırıp testlerin yine geçtiğini görmesidir.
+_pipe = open(os.path.join(os.path.dirname(__file__) or ".",
+                          "core", "pipeline.py"), encoding="utf-8").read()
+kontrol("pipeline f_markers'ı çağırıyor",
+        "f_markers.solve_roll_and_mirror" in _pipe)
+kontrol("pipeline artık 'DEVRE DIŞI' demiyor",
+        "ŞİMDİLİK DEVRE DIŞI" not in _pipe)
+# Homografiyle çelişirse F sonucu kullanılmamalı — sessizce üzerine yazmak
+# tüm desenden gelen ölçümü dört küçük bölgeye feda etmek olurdu.
+kontrol("homografiyle tutarlılık kontrolü var",
+        "_FMarkerUyusmazlik" in _pipe)
+
+_gui = open(os.path.join(os.path.dirname(__file__) or ".",
+                         "gui", "main_window.py"), encoding="utf-8").read()
+kontrol("arayüz roll_from_markers'a bakıyor",
+        "roll_from_markers" in _gui)
+
+# Uçtan uca: gerçek çiftte roll F'lerden gelmeli ve mod-90 notu düşmemeli.
+if os.path.exists(GT_YOL) and os.path.exists(DET_YOL):
+    from core.pipeline import run_analysis
+    from core.config import SystemConfig
+    _res = run_analysis(GT_YOL, DET_YOL, SystemConfig())
+    _p = _res.pointing
+    kontrol("uçtan uca: roll F işaretlerinden geldi",
+            bool(getattr(_p, "roll_from_markers", False)),
+            f"n={getattr(_p, 'n_markers', 0)}")
+    kontrol("uçtan uca: roll homografinin mod-90'ıyla tutarlı",
+            abs((_p.roll_full_deg % 90.0) - 43.3) < 6.0,
+            f"{_p.roll_full_deg:.2f}° -> mod 90 = {_p.roll_full_deg % 90.0:.2f}°")
+    kontrol("uçtan uca: ayna kararı F'lerden verildi",
+            bool(getattr(_p, "mirror_from_markers", False)),
+            f"ayna={getattr(_p, 'mirrored_markers', None)}")
+else:
+    print("   (gerçek dosyalar yok — uçtan uca atlandı)")
+
+
 print("\n" + "=" * 72)
 print(f"SONUÇ: {GECTI} geçti, {KALDI} kaldı")
 print("=" * 72)

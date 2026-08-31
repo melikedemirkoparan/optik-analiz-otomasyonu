@@ -1586,4 +1586,59 @@ Gerçek çift: roll **223.30°**, homografinin mod-90 değeriyle tutarlı
 yani test **gerçekte olmayan bir belirsizliği** ölçüp çözücüyü haksız yere
 suçluyordu. Sentetik desen gerçeğe uymazsa test bir şey kanıtlamaz.
 
+### Panele bağlandı (aynı gün)
+
+`core/pipeline.py`'de F yolu **devre dışıydı** ve yorumu net bir şart
+koyuyordu: *"Düzeltilip döndürme testinin 8/8'i geçince yeniden
+bağlanacak."* Şart artık sağlanıyor.
+
+**Döndürme testi 8/8** (`test_f_markers.py` [8]): gerçek dedektör görüntüsü
+0/45/90/135/180/225/270/315° döndürülüp yöntem tekrar koşuluyor.
+
+    açı=  0: roll=223.30  beklenen=223.30  hata=0.00  ayna=False
+    açı= 45: roll=177.90  beklenen=178.30  hata=0.40  ayna=False
+    açı= 90: roll=133.30  beklenen=133.30  hata=0.00  ayna=False
+    ...      (sekizinde de hata 0.0-0.4°, ayna DEĞİŞMİYOR)
+
+Eskiden 8'de 4'ü yanlıştı ve hatalar 90'ın katlarındaydı; ayna kararı
+dönmeyle değişiyordu (oysa dönme aynayı etkilemez). İkisi de düzeldi.
+
+**Bağlantı:** `measure_pointing` sonrasında `solve_roll_and_mirror`
+çağrılıyor ve `roll_full_deg` F'lerin verdiği tek değerle DEĞİŞTİRİLİYOR.
+Yeni alanlar: `roll_from_markers`, `roll_marker_rms_deg`,
+`roll_marker_ncc`, `n_markers`, `mirror_from_markers`, `mirrored_markers`.
+
+**Homografi feda edilmiyor.** F'ler roll'ü yalnızca TEKLEŞTİRİR; sayının
+kendisi homografininkiyle simetri modülü içinde tutarlı olmalıdır. İki yol
+8°'den fazla ayrışırsa F sonucu KULLANILMAZ (`_FMarkerUyusmazlik`) ve panel
+homografinin dürüst `(mod 90°)` değerinde kalır — çünkü homografi tüm
+desenden, F'ler dört küçük bölgeden gelir.
+
+**Arayüz:** roll F'lerden geldiyse `(mod 90°)` eki YAZILMAZ; yerine
+`(F işaretlerinden, 4 işaret)` yazar. 7I'de eklenen "desen 90° dönmelerde
+kendini tekrarlıyor" notu da o durumda yerini şuna bırakır: *"Roll 4 F
+işaretinden tekleştirildi — halkalar 90°'de kendini tekrarlasa da F'ler
+asimetrik olduğu için roll 0..360° arasında tektir."* Olmayan bir
+belirsizliği bildirmek, gizlemek kadar yanlıştır.
+
+**Uçtan uca doğrulandı** (`run_analysis`, gerçek çift):
+
+    roll_full_deg = 223.300     roll_from_markers = True    n_markers = 4
+    tutarsızlık   = 0.735°      NCC = 0.977
+    mirror_from_markers = True  ayna = False
+
+`test_f_markers.py` **32/32**; [9] bloğu bağlantının kopmadığını kaynak
+metin üzerinden de kontrol eder (birisi pipeline'daki çağrıyı kaldırırsa
+testler sessizce geçmesin diye).
+
+### Sırada ne var
+
+- Ayna kararı artık F'lerden geliyor (`mirror_from_markers`) ama
+  `dense_align`'ın SIFT/ECC tabanlı ayna seçimi hâlâ bağımsız çalışıyor.
+  İkisi çeliştiğinde ne olacağı tanımlı değil — F'ler daha güvenilir
+  (dönmeden etkilenmiyor, 8/8), o yüzden hizalama varyant seçimine ipucu
+  olarak verilebilir.
+- `f_markers` yalnızca yoğun hizalama başarılıysa çağrılıyor. Oysa F'ler
+  homografiye ihtiyaç duymaz; hizalama çöktüğünde de roll verebilirler
+  (cross yolu gibi bağımsız bir dal olabilir).
 

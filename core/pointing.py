@@ -96,6 +96,15 @@ class PointingResult:
     # --- Açısal hatalar ---
     roll_deg: float = float("nan")         # düzlem-içi dönme (±90 katlı, eski)
     roll_full_deg: float = float("nan")    # gerçek yönelim, 0..360
+    # F işaretlerinden çözülen roll. Homografiden gelen değer desenin
+    # dönme simetrisi kadar (halka deseninde 90°) belirsizdir; F'ler
+    # asimetrik olduğu için bu değer 0..360 arasında TEKTİR.
+    roll_from_markers: bool = False        # roll F'lerden mi geldi
+    roll_marker_rms_deg: float = float("nan")   # F'lerin tutarsızlığı
+    roll_marker_ncc: float = float("nan")       # şablon eşleşme kalitesi
+    n_markers: int = 0                     # eşlenen F sayısı
+    mirror_from_markers: bool = False      # ayna kararı F'lerden mi geldi
+    mirrored_markers: bool = False         # F'lerin verdiği ayna kararı
     tilt_deg: float = float("nan")         # düzlem-dışı toplam
     tilt_x_deg: float = float("nan")       # dikey keystone
     tilt_y_deg: float = float("nan")       # yatay keystone

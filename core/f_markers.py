@@ -52,7 +52,8 @@ class FMatch:
     mirrored: bool = False
     mirror_known: bool = False
     scale: float = float("nan")         # GT -> dedektör ölçeği
-    rms_px: float = float("nan")        # eşleme kalıntısı (dedektör pikseli)
+    rms_px: float = float("nan")        # eşleme tutarsızlığı (DERECE)
+    ncc: float = float("nan")           # şablon eşleşme kalitesi (0..1)
     # Kaç F eşleşti. 4 idealdir; 3 ile de roll çözülür ama güven düşer.
     n_matched: int = 0
     pairs: list = field(default_factory=list)   # [(gt_idx, det_idx), ...]
@@ -383,6 +384,7 @@ def solve_roll_and_mirror(gt_img: np.ndarray, det_img: np.ndarray,
     ncc_ort = ncc_ayn if res.mirrored else ncc_duz
     res.n_matched = len(d.points)
     res.rms_px = kazanan_t
+    res.ncc = float(ncc_ort)
 
     # Ayna kararı iki hipotezin AYRIMINA dayanır. Doğru hipotez tutarlı bir
     # roll verir, yanlışı vermez; oran ne kadar büyükse karar o kadar net.

@@ -19,6 +19,11 @@ import cv2
 import numpy as np
 
 from .config import SystemConfig
+
+
+class _FMarkerUyusmazlik(Exception):
+    """F işaretlerinin rolü homografininkiyle çelişti — sonuç kullanılmaz."""
+from . import f_markers
 from . import (optics, image_analysis, siemens_star, tilt_estimators,
                dense_align, pointing, cross_locate, f_markers)
 
@@ -329,24 +334,74 @@ def run_analysis(gt_path: str, det_path: str, cfg: SystemConfig,
                 pattern_radius_px=pattern_radius_px)
             res.messages.extend(res.pointing.messages)
 
-            # --- Roll ve ayna: F işaretlerinden (ŞİMDİLİK DEVRE DIŞI) ---
+            # --- Roll ve ayna: F işaretlerinden (BAĞLI) ---
             #
-            # `f_markers` roll'ün mod-90 belirsizliğini kaldırmayı ve ayna
-            # kararını SIFT'ten bağımsız vermeyi hedefler. Yöntem gerçek bir
-            # ölçümde doğru sonuç verdi (roll 134.73°, ayna EVET) AMA
-            # doğrulama testini geçemedi:
+            # Homografiden gelen roll, desenin dönme simetrisi kadar
+            # belirsizdir: eş merkezli halka deseni 90°'de kendini
+            # tekrarladığı için panel "136.356 (mod 90°)" yazıyordu.
+            # Köşedeki dört F asimetriktir ve üreteç üçüncüsünü bilerek
+            # 45° eğik koyar ("hiçbir dönme/aynalama kombinasyonu paterni
+            # kendine götürmez") — roll'ü tekleştiren bilgi oradadır.
             #
-            #   Aynı dedektör görüntüsü bilinen açılarla döndürülüp yöntem
-            #   tekrar koşuldu. 8 dönmeden 4'ü yanlış çıktı ve hatalar
-            #   90'ın katları civarındaydı (90.1°, 82.5°, 128.6°) — yani
-            #   F'ler bulunuyor ama hangi F'nin hangisine karşılık geldiği
-            #   yanlış çözülüyor. Ayna kararı da dönmeyle değişiyordu, oysa
-            #   dönme aynayı etkilemez.
+            # BU YOL BİR SÜRE DEVRE DIŞIYDI: F'ler bulunuyor ama hangi
+            # F'nin hangisine karşılık geldiği yanlış çözülüyordu; 8
+            # dönmeden 4'ü yanlış çıkıyor ve ayna kararı dönmeyle
+            # değişiyordu. Üç kök neden düzeltildi (doluluk elemesi
+            # simetriyi kıran F'yi atıyordu; tek şablon F'leri kimliğiyle
+            # ayırt edemiyordu; _fit_angle'ın açısı görüntü dönmesinin
+            # TERSİ olduğu için işaret hatalıydı).
             #
-            # Tek bir koşuda doğru çıkması yöntemin çalıştığını göstermez.
-            # Belirsiz bir sayıyı kesin gibi göstermektense homografinin
-            # dürüst "mod 90°" değerinde kalıyoruz. Düzeltilip döndürme
-            # testinin 8/8'i geçince yeniden bağlanacak.
+            # Bağlanma şartı buydu ve artık sağlanıyor: test_f_markers.py
+            # [8] döndürme testi 8/8 geçiyor (hatalar 0.0-0.4°, ayna sekiz
+            # dönmede de sabit). Gerçek çiftte roll 223.30°, NCC 0.98,
+            # tutarsızlık 0.74°.
+            #
+            # HOMOGRAFİ YİNE DE KORUNUR: F'ler roll'ü yalnızca TEKLEŞTİRİR.
+            # Aşağıda mod-90 tutarlılığı kontrol edilir; iki yol
+            # çelişirse F'nin sonucu kabul edilmez, çünkü homografi tüm
+            # desenden, F'ler dört küçük bölgeden gelir.
+            try:
+                fm_res = f_markers.solve_roll_and_mirror(
+                    gt_gray, det_v,
+                    gt_center=pattern_center_px)
+                res.messages.extend(fm_res.messages)
+                if fm_res.ok:
+                    p = res.pointing
+                    homo = p.roll_full_deg
+                    if homo == homo:
+                        # Desenin simetri modülü içinde aynı yeri
+                        # göstermeliler. Göstermiyorlarsa biri yanılıyor.
+                        m = float(res.dense.rotation_modulus_deg)
+                        if not (m > 0.0) or m > 180.0:
+                            # Simetri yoksa modül 360 döner; o durumda
+                            # karşılaştırma zaten tam açı üzerindendir.
+                            m = 360.0
+                        fark = abs(((fm_res.roll_deg - homo) % m))
+                        fark = min(fark, m - fark)
+                        if fark > 8.0:
+                            res.messages.append(
+                                f"Uyarı: F işaretlerinin rolü "
+                                f"({fm_res.roll_deg:.2f}°) homografininkiyle "
+                                f"({homo:.2f}°) {m:.0f}° modülünde "
+                                f"{fark:.2f}° ayrışıyor — F sonucu "
+                                "kullanılmadı.")
+                            raise _FMarkerUyusmazlik
+                    p.roll_full_deg = fm_res.roll_deg
+                    p.roll_from_markers = True
+                    p.roll_marker_rms_deg = fm_res.rms_px
+                    p.roll_marker_ncc = fm_res.ncc
+                    p.n_markers = fm_res.n_matched
+                    if fm_res.mirror_known:
+                        p.mirror_from_markers = True
+                        p.mirrored_markers = fm_res.mirrored
+                    res.messages.append(
+                        f"Bilgi: roll {fm_res.n_matched} F işaretinden "
+                        f"tekleştirildi ({fm_res.roll_deg:.3f}°); "
+                        "mod-90 belirsizliği kalktı.")
+            except _FMarkerUyusmazlik:
+                pass
+            except Exception as e:                          # noqa: BLE001
+                res.messages.append(f"F işareti ölçümü yapılamadı: {e}")
         except Exception as e:                              # noqa: BLE001
             res.messages.append(f"Yönelim ölçüm hatası: {e}")
     else:

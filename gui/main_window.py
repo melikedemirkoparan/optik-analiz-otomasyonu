@@ -2104,9 +2104,18 @@ class MainWindow(QMainWindow):
         # bilinebilir. Bu bir ölçüm eksikliği değil, desenin bilgi
         # içermemesidir — o yüzden ayrı bir uyarı satırı yerine DEĞERİN
         # KENDİSİNDE gösterilir; okuyan kişi sayıyı yanlış okuyamaz.
+        #
+        # F İŞARETLERİ MODÜLÜ KALDIRIR. Köşedeki dört F asimetriktir
+        # (üreteç üçüncüsünü bilerek 45° eğik koyar), bu yüzden roll
+        # onlardan 0..360 arasında TEK değer olarak çözülür. O zaman
+        # "(mod 90°)" eki YANLIŞ olur — var olmayan bir belirsizliği
+        # bildirir. Ek yalnızca roll hâlâ homografiden geliyorsa yazılır.
         _d = getattr(res, "dense", None)
         _mod = getattr(_d, "rotation_modulus_deg", 360.0) if _d else 360.0
-        _sfx = f"  (mod {_mod:.0f}°)" if _mod < 359.9 else ""
+        _f_ile = bool(getattr(p, "roll_from_markers", False))
+        _sfx = "" if _f_ile else (f"  (mod {_mod:.0f}°)" if _mod < 359.9 else "")
+        if _f_ile:
+            _sfx = f"  (F işaretlerinden, {p.n_markers} işaret)"
         if p.roll_full_deg == p.roll_full_deg:
             self.r_roll.set_value(f"{p.roll_full_deg:.3f}{_sfx}")
         else:
@@ -2196,7 +2205,19 @@ class MainWindow(QMainWindow):
                 "Ayna ekseni belirsiz — roll değeri bu belirsizlikten "
                 "etkilenebilir; decenter ve kapsama etkilenmez.")
         # Dönme simetrisi: uyarı değil, ölçünün tanımı.
-        if d is not None and getattr(d, "symmetry_order", 1) > 1:
+        #
+        # AMA F işaretleri çözdüyse bu not artık DOĞRU DEĞİLDİR: desen
+        # halkalarıyla 90°'de kendini tekrarlasa da F'ler asimetriktir ve
+        # roll'ü tekleştirir. Notu yine de yazmak, kullanıcıya olmayan bir
+        # belirsizlik bildirmek olurdu.
+        if getattr(p, "roll_from_markers", False):
+            notes.append(
+                f"Roll {p.n_markers} F işaretinden tekleştirildi — halkalar "
+                f"90°'de kendini tekrarlasa da F'ler asimetrik olduğu için "
+                f"roll 0..360° arasında tektir "
+                f"(tutarsızlık ±{p.roll_marker_rms_deg:.2f}°, "
+                f"NCC {p.roll_marker_ncc:.2f}).")
+        elif d is not None and getattr(d, "symmetry_order", 1) > 1:
             m = d.rotation_modulus_deg
             notes.append(
                 f"Desen {m:.0f}° dönmelerde kendini tekrarlıyor; roll bu "
