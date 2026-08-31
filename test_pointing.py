@@ -109,37 +109,92 @@ def test_roll_tilt():
     return fails
 
 
+def _disk_square_overlap(r: float, a: float) -> float:
+    """
+    Merkezleri çakışık dairenin (yarıçap r) kareyle (yarı-kenar a) kesişim
+    alanı — analitik.
+
+    Beklenti ölçüm kodundan BAĞIMSIZ üretilsin diye kapalı formülle yazıldı;
+    aynı kırpma rutinini çağırıp karşılaştırmak testi tautolojiye çevirirdi.
+    """
+    if r <= a:
+        return math.pi * r * r                    # daire tamamen karede
+    if r >= a * math.sqrt(2.0):
+        return 4.0 * a * a                        # kare tamamen dairede
+    # Daire kenarları kesiyor, köşeler dışarıda: dört AYRIK daire dilimi
+    # (köşeler dairenin dışında olduğu için dilimler örtüşmez) düşülür.
+    seg = r * r * (math.acos(a / r) - (a / r) * math.sqrt(1.0 - (a / r) ** 2))
+    return math.pi * r * r - 4.0 * seg
+
+
 def test_coverage():
     """
-    [3] Kapsama — dedektör GT'nin bir kesitini görüyorsa oran doğru mu.
+    [3] Kapsama — payda EKRANIN TAMAMI DEĞİL, cihazın gördüğü orta daire.
 
-    Beklenen oran doğrudan alanların oranıdır; ölçümün bunu geri vermesi
-    kırpma geometrisinin doğru kurulduğunu kanıtlar.
+    Ground truth referans ekranın tüm karesidir; cihaz onun yalnızca
+    ortasındaki daireyi görebilir. "Desenin ne kadarı kullanıldı" sorusunun
+    paydası bu yüzden o dairedir. Beklenti daire∩kare kesişiminden analitik
+    hesaplanır; ölçümün bunu geri vermesi bölgenin doğru kurulduğunu
+    kanıtlar.
     """
     print("\n[3] KAPSAMA (desenin ne kadarı sensörde)")
     cfg = cfgmod.system_from_preset("Hydra yıldız izleyici")
     base = texture()
     n = base.shape[0]
-    print(f"  {'kesit':>8}{'görünen_ölç':>13}{'görünen_bek':>13}"
+    print(f"  {'kesit':>7}{'yarıçap':>9}{'görünen_ölç':>13}{'görünen_bek':>13}"
           f"{'sensör_dolu':>13}   sonuç")
-    print("  " + "-" * 56)
+    print("  " + "-" * 62)
 
     fails = []
-    for side in (500, 700, 1024):
+    # (kesit, desen yarıçapı) — sırasıyla: daire kesite sığıyor / kesit
+    # dairenin içinde / daire kenarları kesiyor / daire tam kadrajda.
+    for side, radius in ((500, 200.0), (500, 403.0),
+                         (700, 403.0), (1024, 403.0)):
         o = (n - side) // 2
         crop = base[o:o + side, o:o + side]
         H = align(base, crop)
         if H is None:
-            print(f"  {side:>8}   hizalanamadı   HATA")
-            fails.append(side)
+            print(f"  {side:>7}{radius:>9.0f}   hizalanamadı   HATA")
+            fails.append((side, radius))
             continue
-        p = pointing.measure_pointing(H, base.shape, crop.shape, cfg)
-        want = (side * side) / float(n * n)
+        p = pointing.measure_pointing(H, base.shape, crop.shape, cfg,
+                                      pattern_radius_px=radius)
+        want = (_disk_square_overlap(radius, side / 2.0)
+                / (math.pi * radius * radius))
         good = abs(p.coverage_frac - want) < TOL_COVER
-        print(f"  {side:>8}{100*p.coverage_frac:>12.1f}%"
+        print(f"  {side:>7}{radius:>9.0f}{100*p.coverage_frac:>12.1f}%"
               f"{100*want:>12.1f}%{100*p.sensor_fill_frac:>12.1f}%   {ok(good)}")
         if not good:
-            fails.append(side)
+            fails.append((side, radius))
+
+    # Payda gerçekten daire mi — ekranın tamamı olsaydı 1024² = 1.048.576.
+    crop = base
+    H = align(base, crop)
+    p = pointing.measure_pointing(H, base.shape, crop.shape, cfg,
+                                  pattern_radius_px=403.0)
+    want_area = math.pi * 403.0 ** 2
+    good = (abs(p.pattern_area_gt_px - want_area) < 0.01 * want_area
+            and p.pattern_area_gt_px < 0.6 * n * n)
+    print(f"  payda: {p.pattern_area_gt_px:,.0f} px (daire {want_area:,.0f}, "
+          f"ekranın tamamı {n*n:,})   {ok(good)}")
+    if not good:
+        fails.append("payda ekranın tamamı")
+
+    # Yarıçap hiç bilinmiyorsa bölge zorunlu olarak tüm ekrandır — ve bunu
+    # SÖYLER. Pasif panelli preset'te otomatik türetme yoktur.
+    cfg_pasif = cfgmod.system_from_preset("CMV4000 + Rodenstock 70mm")
+    side = 500
+    o = (n - side) // 2
+    crop = base[o:o + side, o:o + side]
+    H = align(base, crop)
+    p = pointing.measure_pointing(H, base.shape, crop.shape, cfg_pasif)
+    want = (side * side) / float(n * n)
+    good = (abs(p.coverage_frac - want) < TOL_COVER
+            and "tüm ekran" in p.ref_region)
+    print(f"  yarıçap bilinmiyor → bölge {p.ref_region!r}, "
+          f"kapsama {100*p.coverage_frac:.1f}% (bek {100*want:.1f}%)   {ok(good)}")
+    if not good:
+        fails.append("yarıçapsız geri düşüş")
 
     # Kenar açıları simetrik ve FOV yarısına eşit olmalı
     crop = base
@@ -181,6 +236,23 @@ def test_margin():
               f"{str(p.pattern_fully_visible):>10}   {ok(good)}")
         if not good:
             fails.append(radius)
+
+    # Bağlayan sınır her zaman sensörün kenarı DEĞİL. Hydra'da lensin
+    # görüntü dairesi 503 px, sensörün yarı-kenarı 512 px: r=480'lik bir
+    # desen dikdörtgene 31.5 px payla sığar ama daireye yalnızca 23.1 px
+    # payla. Bu ayrım pratikte "daha büyük dedektör al" ile "lensi değiştir"
+    # arasındaki farktır.
+    H_full = align(base, base)
+    if H_full is None:
+        return fails + ["tam kadraj hizalama"]
+    p = pointing.measure_pointing(H_full, base.shape, base.shape, cfg,
+                                  pattern_radius_px=480.0)
+    good = (p.margin_limit == "görüntü dairesi"
+            and abs(p.margin_px - 23.1) < 2.0)
+    print(f"  görüntü dairesi sınırı: pay {p.margin_px:+.1f} px "
+          f"(sınır {p.margin_limit!r}, kenar payı olsa +31.5)   {ok(good)}")
+    if not good:
+        fails.append("görüntü dairesi sınırı")
     return fails
 
 

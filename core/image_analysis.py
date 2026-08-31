@@ -37,6 +37,10 @@ class MatchResult:
     tilt: optics.TiltResult | None
     gt_shape: tuple
     det_shape: tuple
+    # Ayna kararı GERÇEKTEN ÖLÇÜLDÜ MÜ. `mirrored` tek başına yanıltıcıdır:
+    # eşleme çökünce varyant "raw" kalır ve False okunur — yani "ayna yok"
+    # değil "ölçemedim". Panel ikisini ayırt edebilsin diye ayrı bayrak.
+    mirror_known: bool = False
     degenerate: bool = False       # homografi dejenere mi (bkz. _homography_is_sane)
     inlier_spread: float = 0.0     # inlier'ların yayılımı (kısa kenara oran)
     gt_inverted: bool = False      # GT kontrastı terslenerek mi eşleşti
@@ -44,11 +48,63 @@ class MatchResult:
     guided_matches: int = 0        # güdümlü aşamada kapıdan geçen eşleşme sayısı
 
 
+# Bir varyantın "kazandı" sayılması için gereken en az RANSAC inlier'ı.
+# Homografiyi ayakta tutan sayı budur; bunun altında varyant seçimi de,
+# ondan okunan ayna kararı da anlamsızdır.
+_MIN_INLIERS = 10
+
+
 def load_image_gray(path: str) -> np.ndarray:
-    img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    """
+    Görüntüyü 8-bit griye çevirerek okur.
+
+    NEDEN `IMREAD_GRAYSCALE` DEĞİL. O bayrak 16-bit bir PNG'yi 256'ya
+    BÖLEREK 8-bit'e indirir. Bilimsel kameraların ürettiği mono12/mono14
+    kareler 16-bit kaba yazılır ama veriyi kabın alt ucunda taşır; 256'ya
+    bölmek o veriyi ezer.
+
+    Gerçek bir ölçüm bunu somut gösteriyor (CMV4000, mono12, 50 ms):
+
+        ham veri                 : 5152 – 30896   (15408 seviye)
+        IMREAD_GRAYSCALE sonrası :   20 –   120   (  100 seviye, std 9.2)
+
+    Dinamik aralığın %99'u gidiyor. Etkisi ölçüldü: SIFT bu görüntüde 212
+    keypoint buluyordu, persentil germesiyle 1118 (5 kat); kaba hizalama
+    güveni 0.056'dan 0.083'e çıkıyor.
+
+    Bu yüzden ham okuyup (IMREAD_UNCHANGED) 8-bit değilse persentil
+    germesiyle indiriyoruz. p1–p99.5 seçimi bilinçli: min/max kullanmak
+    tek bir sıcak pikselin (ya da ölü pikselin) tüm ölçeği belirlemesine
+    izin verirdi.
+
+    8-bit görüntüler DOKUNULMADAN geçer — ground truth desenleri zaten
+    8-bit ve tam kontrastlı; onları germek polariteyi ve zemin seviyesini
+    oynatır.
+    """
+    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     if img is None:
         raise FileNotFoundError(f"Görüntü okunamadı: {path}")
-    return img
+
+    # Renk / alfa varsa griye indir.
+    if img.ndim == 3:
+        if img.shape[2] == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
+        else:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    if img.dtype == np.uint8:
+        return img
+
+    # 16-bit (veya float) — persentil germesiyle 8-bit'e indir.
+    a = img.astype(np.float32)
+    lo, hi = np.percentile(a, [1.0, 99.5])
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        # Düz görüntü (tek değer) ya da bozuk persentil: min/max'a düş.
+        lo = float(a.min())
+        hi = float(a.max())
+        if hi <= lo:
+            return np.zeros(a.shape, dtype=np.uint8)
+    return np.clip((a - lo) / (hi - lo) * 255.0, 0, 255).astype(np.uint8)
 
 
 def _normalize(img: np.ndarray) -> np.ndarray:
@@ -374,7 +430,7 @@ def analyze(gt_path: str, det_path: str, cfg: SystemConfig,
             if H is None:
                 continue
             inliers = int(mask.sum())
-            if inliers < 10:
+            if inliers < _MIN_INLIERS:
                 continue
 
             mask_flat = mask.reshape(-1).astype(bool)
@@ -448,11 +504,23 @@ def analyze(gt_path: str, det_path: str, cfg: SystemConfig,
     if tilt is not None and tilt.mirrored:
         mirrored = True
 
+    # AYNA KARARI ÖLÇÜLDÜ MÜ. Varyant adına bakmak, ancak varyantlar
+    # ARASINDA gerçek bir seçim yapıldıysa anlamlıdır. Eşleme çökerse
+    # (inlier yok) hiçbir varyant kazanmamıştır; `chosen` varsayılan "raw"
+    # kalır ve `mirrored` False okunur. Panel bunu "hayır" diye yazınca
+    # ölçülmemiş bir şey ölçülmüş gibi görünür — gerçek bir koşuda ayna
+    # AÇIKÇA varken panel "hayır" diyordu.
+    #
+    # Eşik olarak inlier sayısını kullanıyoruz: homografiyi RANSAC ile
+    # ayakta tutan da odur. Dejenere homografi de karar sayılmaz.
+    mirror_known = bool(chosen["inliers"] >= _MIN_INLIERS and not degenerate)
+
     return MatchResult(
         homography=None if degenerate else chosen["H"],
         num_matches=chosen["matches"],
         num_inliers=chosen["inliers"],
         mirrored=mirrored,
+        mirror_known=mirror_known,
         detector_variant=chosen["variant"],
         reproj_error_px=chosen["reproj"],
         tilt=tilt,

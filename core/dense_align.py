@@ -220,6 +220,47 @@ def _similarity_matrix(scale: float, rot_deg: float,
     return T2 @ R @ T1
 
 
+def rotational_symmetry_order(img: np.ndarray,
+                              center: tuple | None = None) -> int:
+    """
+    Desenin kendi dönme simetrisi katı: 4 (90°), 2 (180°) ya da 1 (yok).
+
+    Görüntü merkez etrafında döndürülüp kendisiyle karşılaştırılır. Yüksek
+    korelasyon "bu desen o açı kadar döndürülünce kendine benziyor" demektir
+    — o zaman ölçülen dönme ancak 360/kat modülünde anlamlıdır.
+
+    Yalnızca merkeze sığan DAİRE içi karşılaştırılır; köşeler dönmede
+    görüntüden çıkar ve karşılaştırmayı bozar.
+    """
+    if img is None or img.ndim != 2:
+        return 1
+    h, w = img.shape[:2]
+    c = center if center is not None else ((w - 1) / 2.0, (h - 1) / 2.0)
+    r = min(c[0], c[1], w - 1 - c[0], h - 1 - c[1])
+    if r < 20:
+        return 1
+    yy, xx = np.mgrid[0:h, 0:w]
+    mask = ((xx - c[0]) ** 2 + (yy - c[1]) ** 2) < r * r
+    base = img[mask].astype(np.float64)
+    base -= base.mean()
+    nb = np.linalg.norm(base)
+    if nb < 1e-9:
+        return 1
+
+    def self_ncc(angle: float) -> float:
+        M = cv2.getRotationMatrix2D((float(c[0]), float(c[1])), angle, 1.0)
+        rot = cv2.warpAffine(img, M, (w, h))[mask].astype(np.float64)
+        rot -= rot.mean()
+        nr = np.linalg.norm(rot)
+        return float(base @ rot / (nb * nr)) if nr > 1e-9 else 0.0
+
+    if self_ncc(90.0) >= SYMMETRY_NCC_MIN and self_ncc(270.0) >= SYMMETRY_NCC_MIN:
+        return 4
+    if self_ncc(180.0) >= SYMMETRY_NCC_MIN:
+        return 2
+    return 1
+
+
 def _score_alignment(gt: np.ndarray, det: np.ndarray, M: np.ndarray) -> float:
     """
     Bir dönüşümün ne kadar iyi olduğunu ölçer: warp edilmiş GT ile dedektörün
@@ -420,9 +461,13 @@ def coarse_align(gt: np.ndarray, det: np.ndarray,
     res.rot_candidates = rot_cands
     res.rot_ambiguous = bool(rot_amb)
     if rot_amb:
+        # Bu bir arıza değil, YÖNTEM SEÇİMİDİR: kestirme yol (faz
+        # korelasyonu) bu desende çalışmadığı için pahalı ama sağlam yol
+        # (tam açı taraması + ECC) koşuldu. Sonuç doğru, yalnızca daha
+        # uzun sürüyor — o yüzden uyarı değil bilgi olarak raporlanır.
         res.messages.append(
-            "Dönme faz korelasyonuyla çözülemedi (dairesel simetrik desen) — "
-            "açı taraması yapıldı, nihai seçim ECC ile.")
+            "Bilgi: dönme faz korelasyonuyla okunamadı (dairesel simetrik "
+            "desen) — tam açı taraması yapıldı, nihai seçim ECC ile.")
     if not res.ok:
         res.messages.append(
             f"Kaba hizalama güveni düşük (korelasyon {score:.3f}) — "
@@ -553,6 +598,13 @@ WINSIZE = 25
 # Gerçek bir ayrımda fark 0.1 mertebesindedir (ölçüldü: 0.759 vs 0.868);
 # dejenere durumda tam 0.0000 çıkar.
 MIRROR_MARGIN_MIN = 0.01
+
+# Desenin KENDİ dönme simetrisi bu eşiğin üstündeyse "kendini tekrar ediyor"
+# sayılır. Ölçülen: FOV deseni 90/180/270°'de kendisiyle 0.965 korelasyon
+# veriyor (aynalanmış hâliyle 0.896 — yani ayna AYIRT EDİLEBİLİR, dönme
+# değil). Böyle bir desende roll ancak 360/kat kadar bir modül içinde
+# bilinebilir; bu bir ölçüm hatası değil, desenin bilgi içermemesidir.
+SYMMETRY_NCC_MIN = 0.90
 
 # Log-polar faz korelasyonunun güveni bunun altındaysa dönme okunamamış
 # sayılır ve açı taraması devreye girer. Dairesel simetrik desenlerde
@@ -868,6 +920,10 @@ class DenseResult:
     # bunu bilmeli. Dar kırpılmış görüntülerde tipiktir.
     mirror_ambiguous: bool = False
     mirror_margin: float = 0.0     # en iyi iki varyantın ECC farkı
+    # Desenin kendi dönme simetrisi (4 = 90°'de kendini tekrar ediyor).
+    # Böyle bir desende roll ancak `rotation_modulus_deg` modülünde
+    # bilinebilir — bu bir ölçüm eksikliği değil, desenin sınırıdır.
+    symmetry_order: int = 1
     messages: list[str] = field(default_factory=list)
 
     @property
@@ -882,6 +938,11 @@ class DenseResult:
     @property
     def tilt_deg(self) -> float:
         return self.tilt.total_tilt_deg if self.tilt else float("nan")
+
+    @property
+    def rotation_modulus_deg(self) -> float:
+        """Roll'ün belirlenebildiği modül (simetri yoksa 360°)."""
+        return 360.0 / self.symmetry_order if self.symmetry_order > 1 else 360.0
 
     @property
     def mirrored(self) -> bool:
@@ -942,7 +1003,7 @@ def analyze_dense(gt: np.ndarray, det: np.ndarray,
                 r = rr
         if r is None:
             continue
-        all_scores.append(r.correlation)
+        all_scores.append((r.correlation, vname))
         if best is None or r.correlation > best[0]:
             best = (r.correlation, c, r, dv)
 
@@ -954,15 +1015,41 @@ def analyze_dense(gt: np.ndarray, det: np.ndarray,
     res.messages.extend(res.coarse.messages)
     res.messages.extend(res.refine.messages)
 
-    # Ayna seçimi ne kadar kesin? En iyi iki skorun farkı ihmal edilebilirse
-    # seçim keyfîdir ve bu DÜRÜSTÇE raporlanmalıdır.
+    # Desenin kendi dönme simetrisi — belirsizliği DOĞRU teşhis etmek için
+    # gerekli (aşağıya bakınız).
+    res.symmetry_order = rotational_symmetry_order(gt)
+
+    # Ayna seçimi ne kadar kesin?
+    #
+    # DİKKAT — eskiden "en iyi iki skor eşitse ayna belirsiz" deniyordu ve bu
+    # YANLIŞ TEŞHİSTİ. Dört varyantın ikisi aynanın aynı tarafındadır:
+    #     flip_both = raw    + 180°        (ayna değil, DÖNME)
+    #     flip_v    = flip_h + 180°
+    # Ölçülen gerçek çiftte skorlar raw 0.8347 / flip_both 0.8347 (eşit) ve
+    # flip_h 0.7871 / flip_v 0.7872 idi: yani ayna NET biçimde çözülmüştü,
+    # eşit çıkan iki aday birbirinin 180° dönmüş hâliydi. Panel buna
+    # "ayna ekseni belirsiz" diyordu.
+    #
+    # Doğrusu: ayna belirsizliği İKİ GRUP arasındaki fark küçükse vardır.
+    # Grup içindeki eşitlik dönme belirsizliğidir ve desenin simetrisiyle
+    # açıklanır (bkz. `symmetry_order`) — uyarı değil, desenin sınırıdır.
     if len(all_scores) >= 2:
-        top2 = sorted(all_scores, reverse=True)[:2]
-        res.mirror_margin = float(top2[0] - top2[1])
-        res.mirror_ambiguous = bool(res.mirror_margin < MIRROR_MARGIN_MIN)
+        groups = {"a": ("raw", "flip_both"), "b": ("flip_h", "flip_v")}
+        gbest = {}
+        for key, names in groups.items():
+            vals = [sc for sc, vn in all_scores if vn in names]
+            if vals:
+                gbest[key] = max(vals)
+        if len(gbest) == 2:
+            res.mirror_margin = float(abs(gbest["a"] - gbest["b"]))
+            res.mirror_ambiguous = bool(res.mirror_margin < MIRROR_MARGIN_MIN)
+        else:
+            top2 = sorted((sc for sc, _ in all_scores), reverse=True)[:2]
+            res.mirror_margin = float(top2[0] - top2[1])
+            res.mirror_ambiguous = bool(res.mirror_margin < MIRROR_MARGIN_MIN)
         if res.mirror_ambiguous:
             res.messages.append(
-                f"Ayna ekseni belirsiz (en iyi iki varyant farkı "
+                f"Ayna ekseni belirsiz (aynalı/aynasız varyantların farkı "
                 f"{res.mirror_margin:.4f}) — dönme bu belirsizlikten "
                 f"etkilenebilir; decenter ve kapsama etkilenmez.")
 

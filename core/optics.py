@@ -49,6 +49,13 @@ class FovResult:
     # bozulduğu doğrudan bu farktır.
     ifov_edge_x_urad: float = float("nan")
     ifov_edge_y_urad: float = float("nan")
+    # Kenar IFOV'unun GÖRÜNTÜ DAİRESİYLE kırpılmış hali. Yukarıdaki
+    # `ifov_edge_*` sensörün fiziksel kenarındaki pikseli anlatır; daire
+    # sensörden küçükse o piksel karanlıktır ve gördüğü açı gerçek değildir.
+    # Aydınlık alanın gerçek kenarı dairenin sınırıdır — bu alanlar oradaki
+    # pikselin açısını verir. Daire kapsıyorsa ikisi aynıdır.
+    ifov_eff_edge_x_urad: float = float("nan")
+    ifov_eff_edge_y_urad: float = float("nan")
 
     # ---- Görüntü dairesi kısıtı ----
     #
@@ -130,7 +137,9 @@ def compute_fov(cfg: SystemConfig) -> FovResult:
     fov_d = proj.full_fov_deg(model, f, det.diagonal_mm)
 
     # Kenar pikselinin açısı — piksel ölçeğinin alan boyunca ne kadar
-    # değiştiğini gösterir.
+    # değiştiğini gösterir. SENSÖRÜN fiziksel kenarındaki piksel için;
+    # görüntü dairesi kısıtlıysa o piksel karanlık olabilir (aşağıda
+    # ayrıca aydınlık alanın kenarı için hesaplanır).
     ifov_ex = proj.ifov_rad(model, f, pitch_x_mm, fov_x / 2.0)
     ifov_ey = proj.ifov_rad(model, f, pitch_y_mm, fov_y / 2.0)
 
@@ -147,10 +156,15 @@ def compute_fov(cfg: SystemConfig) -> FovResult:
         # Köşe en uzak nokta; onu kapsıyorsa tüm sensör kapsanıyor demektir.
         kapsiyor = r_circle >= det.diagonal_mm / 2.0 - 1e-9
         circle_mm = 2.0 * r_circle
+        # Kenar IFOV'u da kırpılmış açıdan hesaplanmalı: aydınlık alanın
+        # gerçek kenarı sensörün kenarı değil, dairenin sınırıdır.
+        ifov_eex = proj.ifov_rad(model, f, pitch_x_mm, eff_x / 2.0)
+        ifov_eey = proj.ifov_rad(model, f, pitch_y_mm, eff_y / 2.0)
     else:
         eff_x, eff_y, eff_d = fov_x, fov_y, fov_d
         kapsiyor = True
         circle_mm = float("nan")
+        ifov_eex, ifov_eey = ifov_ex, ifov_ey
 
     return FovResult(
         ifov_x_urad=ifov_x * 1e6,
@@ -165,6 +179,8 @@ def compute_fov(cfg: SystemConfig) -> FovResult:
         projection=model,
         ifov_edge_x_urad=ifov_ex * 1e6,
         ifov_edge_y_urad=ifov_ey * 1e6,
+        ifov_eff_edge_x_urad=ifov_eex * 1e6,
+        ifov_eff_edge_y_urad=ifov_eey * 1e6,
         image_circle_mm=circle_mm,
         covers_sensor=bool(kapsiyor),
         eff_fov_x_deg=eff_x,

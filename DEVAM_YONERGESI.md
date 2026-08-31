@@ -1301,6 +1301,300 @@ sistemde uydurma bir kırpma uygulanırdı. CMV4000 referansları (9.200°,
 
 ---
 
+## 7I. UYARI ALANININ TEMİZLENMESİ (2026-08-27)
+
+Kullanıcı: *"hepsini kaldıralım"* — panelde ölçüm başarılıyken dört satır
+uyarı duruyordu. Hiçbiri gizlenmedi; her birinin ya SEBEBİ kaldırıldı ya da
+doğru yere taşındı.
+
+### 1. "Ayna ekseni belirsiz" — YANLIŞ TEŞHİSTİ
+
+Dört ayna varyantının ikisi aynanın AYNI tarafındadır:
+
+    flip_both = raw    + 180°     (ayna değil, DÖNME)
+    flip_v    = flip_h + 180°
+
+Ölçülen skorlar: **raw 0.8347 / flip_both 0.8347** (eşit) — **flip_h 0.7871 /
+flip_v 0.7872**. Yani ayna NET çözülmüştü (fark 0.0475); eşit çıkan iki aday
+birbirinin 180° dönmüş hâliydi. Eski kod "en iyi iki skor eşitse ayna
+belirsiz" dediği için ölçüm doğruyken uyarı yazıyordu.
+
+**Düzeltme:** ayna belirsizliği artık İKİ GRUP arasındaki farka bakıyor.
+Grup içindeki eşitlik dönme belirsizliğidir ve desenin simetrisiyle
+açıklanır.
+
+### 2. Dönme belirsizliğinin gerçek kaynağı — desenin kendisi
+
+`rotational_symmetry_order()` deseni kendi merkezinde döndürüp kendisiyle
+karşılaştırıyor. FOV deseni için ölçülen:
+
+| karşılaştırma | GT | dedektör |
+|---|---|---|
+| 90° dönmüş hâliyle | **0.9648** | 0.9433 |
+| 180° dönmüş hâliyle | **0.9648** | 0.9294 |
+| aynalanmış hâliyle | 0.8959 | 0.8915 |
+
+Desen 90°'de kendini tekrar ediyor (F harfleri de 90° aralıklarla dönmüş
+kopyalar), ayna ise ayırt edilebiliyor. Yani **roll ancak 90° modülünde
+bilinebilir** — bu bir ölçüm eksikliği değil, desende o bilginin
+BULUNMAMASI. Hiçbir algoritma bunu çözemez.
+
+**Karar:** belirsizlik dipnot değil, DEĞERİN KENDİSİ olarak gösteriliyor:
+
+    Roll (düzlem-içi dönme)      136.356  (mod 90°)
+
+Yönelim notunda ayrıca: *"Desen 90° dönmelerde kendini tekrarlıyor; roll bu
+modül içinde geçerlidir (ör. 136.4° ile 226.4° ayırt edilemez). Decenter,
+eğiklik ve kapsama etkilenmez."* Uyarı satırı kalktı; bilgi kalmadı sayılmaz.
+
+> Bunu ortadan kaldırmanın tek yolu DESENİ değiştirmektir: 4 F'den birini
+> farklı yapmak (ör. tek bir kenara ikinci bir işaret) roll'ü tekleştirir.
+
+### 3. "Dönme faz korelasyonuyla çözülemedi" — yöntem notu
+
+Arıza değil, yol seçimi: kestirme yol (log-polar faz korelasyonu) dairesel
+simetrik desende tepe üretmiyor, o yüzden tam açı taraması + ECC koşuluyor.
+Sonuç doğru, sadece daha uzun sürüyor. `Bilgi:` ön ekiyle işaretlendi.
+
+### 4. "Merkezi Siemens star tespit edilemedi" — artık koşullu
+
+Eş merkezli çember paterninde yıldız zaten yok; tilt `concentric_rings` ile
+ölçülüyor. Karar tilt katmanından SONRA veriliyor: bir yöntem ölçtüyse
+`Bilgi: merkezi Siemens star yok — tilt 'concentric_rings' ile ölçüldü`,
+hiçbiri ölçemediyse eski uyarı.
+
+### Mesaj sınıflandırması
+
+`Bilgi:` ile başlayan mesajlar **uyarı alanından çıktı**, "▸ Ayrıntılar"
+kutusuna taşındı (`lbl_details_notes`). Uyarı alanı yalnızca gerçek
+uyarıları gösteriyor ve hiç uyarı yoksa boş kalıyor.
+
+### Sonuç
+
+```
+DURUM  : ✓ Ölçüm güvenilir
+Dönme  : +43.610      Roll: 136.356 (mod 90°)      Eğiklik: 1.366
+UYARI ALANI: (boş)
+Ayrıntılar ▸ · dönme faz korelasyonuyla okunamadı — tam açı taraması + ECC
+              · eşleme güdümlü yapıldı (9 eşleşme, 9 inlier, 0.57 px)
+              · merkezi Siemens star yok — tilt 'concentric_rings' ile ölçüldü
+```
+
+On üç test dosyası da geçiyor (`test_projection` 86, `test_solver` 123,
+`test_goruntu_dairesi` 75, `test_ui_kaynak` 52 kontrol dahil).
+
+---
+
+## 7J. KAPSAMANIN PAYDASI: EKRANIN TAMAMI DEĞİL, GÖRÜNTÜ DAİRESİ (2026-08-28)
+
+### Sorun
+
+"Desenden kullanılan" satırının paydası **ground truth görüntüsünün
+tamamıydı** (`gw * gh`). Ama ground truth referans ekranın TÜM karesidir
+(STOS'ta 1280×1024) ve cihaz o karenin yalnızca **ortasındaki daireyi**
+görebilir — yarı-FOV'un ekrandaki yarıçapı. Dışarıda kalan kenar hiçbir
+yönelimde sensöre düşmez.
+
+Sonuç: kusursuz hizalı bir sistemde bile satır `%40` gibi bir sayı veriyor,
+"desen kırpılıyor" diye okunuyordu. Kırpılan şey desen değil, ekranın hiç
+ölçüme girmeyen boş kenarıydı.
+
+Aynı hata "desen tamamı görünüyor mu" kararında da vardı: GT
+DİKDÖRTGENİNİN dört köşesi sensöre sığıyor mu diye bakılıyordu. Ekranın
+köşesi zaten hiçbir zaman sığmaz — cevap her koşuda "HAYIR".
+
+Dedektör tarafında da simetrik bir eksik vardı: sensörün kullanılabilir
+alanı dikdörtgen sanılıyordu. Lensin görüntü dairesi sensörden küçükse
+**köşeler karanlıktır**; Hydra'da daire 503 px, sensörün yarı-kenarı
+512 px — kenar ortası bile dairenin dışında.
+
+### Çözüm
+
+`measure_pointing` artık iki bölge kesiştiriyor:
+
+| taraf | eski | yeni |
+|---|---|---|
+| ground truth | tüm görüntü (`gw × gh`) | **karşılaştırma dairesi** (yarı-FOV'un ekrandaki yarıçapı), GT çerçevesine kırpılmış |
+| dedektör | sensör dikdörtgeni | **aydınlık alan** = dikdörtgen ∩ lensin görüntü dairesi |
+
+Bunun için `_clip_convex` (genel konveks Sutherland–Hodgman) ve `_disk_poly`
+eklendi; `_clip_to_rect` yalnız dikdörtgen kesiyordu, daire kesemiyordu.
+
+Yeni alanlar: `ref_radius_gt_px`, `ref_region`, `illuminated_area_px`,
+`image_circle_px`, `margin_limit`.
+
+### Yarıçap artık kırpılmış FOV'dan
+
+`pattern_radius_from_fov_px` geometrik `fov_x_deg`ten türetiliyordu; oysa
+Hydra'da lensin dairesi sensörün kenarına bile ışık düşürmüyor. Artık
+`eff_fov_x_deg` (daireyle kırpılmış) kullanılıyor: **410 px → 403 px**.
+Kırpılmamış sayı, hiç görülmeyen bir halkayı "kullanılabilir desen"
+saymak demekti.
+
+### Payın iki sınırı
+
+`margin_px` yalnız sensörün kenarına bakıyordu. Sınır iki tane:
+
+```
+pay = min( sensör kenarına mesafe − r_desen ,
+           görüntü dairesi yarıçapı − decenter − r_desen )
+```
+
+Hangisinin bağladığı `margin_limit` ile raporlanıyor. Fark pratikte
+**"daha büyük dedektör al" ile "lensi değiştir"** arasındaki farktır:
+Hydra'da r=480'lik bir desen dikdörtgene +31.5 px payla sığar ama
+daireye yalnızca +23.1 px payla.
+
+### Yarıçap bilinmiyorsa
+
+Pasif panel + kullanıcı girdisi yoksa bölge zorunlu olarak tüm ekrana
+düşer. O zaman `ref_region` bunu **söyler** ("tüm ekran — desen yarıçapı
+bilinmiyor") ve arayüz uyarı satırı ekler; sayı sessizce eski anlamına
+kaymaz.
+
+### Doğrulama
+
+`test_pointing.py` [3] ve [4]: beklenen kapsama, daire∩kare kesişiminin
+**analitik** formülünden üretiliyor (aynı kırpma rutinini çağırmak testi
+tautolojiye çevirirdi). Dört geometri sınanıyor — daire kesitin içinde,
+kesit dairenin içinde, daire kenarları kesiyor, daire tam kadrajda — artı
+paydanın gerçekten daire olduğu (510.223 px, ekranın tamamı 1.048.576),
+yarıçapsız geri düşüş ve görüntü dairesinin payı bağladığı durum.
+
+---
+
+---
+
+## 7K. ROLL'ÜN MOD-90 BELİRSİZLİĞİ: F İŞARETLERİ — YARIM KALDI (2026-08-28)
+
+> **BURADAN DEVAM EDİLECEK.** `core/f_markers.py` ve `test_f_markers.py`
+> henüz commit edilmemiş çalışmaydı; bu dalla birlikte pushlandı.
+> Test durumu: **12 geçti, 10 kaldı.** Aşağıda iki ayrı kök neden ve
+> ölçülmüş kanıtları var. Teşhis tamamlandı, DÜZELTME YAPILMADI.
+
+### Hatırlatma: çözülmek istenen şey
+
+7I'de saptandığı gibi eş merkezli halka deseni 90° dönmelerde kendini
+tekrar ediyor, bu yüzden homografiden okunan roll yalnızca `mod 90°`
+biliniyordu (panelde `136.356 (mod 90°)`). Fikir: desendeki dört köşe **F
+harfi** asimetriktir, ne dönme ne ayna simetrisi vardır; onlardan roll
+0..360° tam çözülmeli ve ayna kararı SIFT'e gerek kalmadan verilmeli.
+
+Yöntem, her F için İKİ açı ölçmeye dayanıyor:
+
+    azimut (az) : F'nin desen merkezine göre yönü
+    şekil  (ac) : şablonu o F'ye oturtmak için gereken dönme
+
+Görüntü yalnızca döndürülmüşse ikisi AYNI miktarda kayar. Bu yüzden
+`az - ac` her F için bir **imza**dır ve iki görüntü arasındaki imza farkı
+doğrudan roll'ü verir.
+
+### KÖK NEDEN 1 — doluluk elemesi GERÇEK bir F'yi atıyor
+
+`find_f_markers()` içindeki doluluk (alan / çevre kutusu) elemesi, halka
+yayını F'den ayırmak için eklenmişti. Ama F'ler **döndükçe doluluk oranı
+değişiyor**: aynı harf, kutusu eğik durduğunda farklı bir oran veriyor.
+
+Sentetik desende ölçüldü (roll=0, aday listesi zaten TAM 4 gerçek F):
+
+| alan | bw×bh | doluluk |
+|---|---|---|
+| 198 | 24×37 | **0.223**  ← ±0.04 bandının dışında kaldı, ELENDİ |
+| 188 | 21×33 | 0.271 |
+| 185 | 33×21 | 0.267 |
+| 185 | 33×21 | 0.267 |
+
+Yani çevre-kutusu + alan elemesi halka yayını zaten tamamen temizlemişti
+(4 aday, hepsi F). Doluluk elemesi bu noktada **yalnızca zarar veriyor**:
+her koşuda dört F'den birini "halka parçası" sanıp atıyor.
+
+Ölçülen sonuç — roll'e göre bulunan F sayısı:
+
+    roll=  0 -> 3 F   (1 elendi)
+    roll= 30 -> 3 F   (1 elendi)
+    roll=134 -> 3 F   (1 elendi)
+    roll=225 -> 4 F   (eleme tesadüfen tetiklenmedi)
+    roll=310 -> 4 F
+
+Testlerdeki `1 aday doluluk uyumsuzluğundan elendi (F değil, muhtemelen
+halka parçası)` mesajının kaynağı budur; [2] [4] [5] ve [3]'ün bir kısmı
+bu tek satır yüzünden kalıyor.
+
+**Doğrulama:** doluluk elemesi devre dışı bırakılıp geri kalan her şey
+aynı tutulduğunda:
+
+    roll   0 ->   0.00  (hata 0.00)   OK
+    roll 134 -> 136.00  (hata 2.00)   OK
+    roll 310 -> 315.20  (hata 5.20)   OK
+    ayna testi: düz  ok=True mirrored=False known=True   OK
+                ayna ok=True mirrored=True  known=True   OK
+    roll  30 -> ÇÖZÜLEMEDİ  (tutarsızlık 29.0°)
+    roll 225 -> ÇÖZÜLEMEDİ  (tutarsızlık 46.4°)
+
+Yani ayna kararı ve rollerin bir kısmı DÜZELIYOR — ama ikisi hâlâ
+kalıyor. Demek ki ikinci bir sorun var.
+
+### KÖK NEDEN 2 — desenin F'leri roll'ü TEKLEŞTİRMİYOR
+
+Asıl bulgu bu ve tasarımı ilgilendiriyor. `az - ca` imzası bir görüntü
+İÇİNDE mükemmel tutarlı çıkıyor:
+
+    GT        : imzalar 44.99 / 46.99 / 46.90     (çok sıkı)
+    roll=30   : imzalar 104.88 / 104.83 / 105.07  (çok sıkı)
+    roll=225  : imzalar 137.86 / 135.88 / 136.08  (+ bir aykırı 272.94)
+
+Ama imzanın KAYMASI uygulanan roll'e eşit değil:
+
+    roll=30  : 105 - 47 = **58°**   (30 bekleniyordu)
+    roll=225 : 136 - 47 = **89°**   (225 bekleniyordu)
+
+Sebep, test deseninin (ve gerçek desenin) F açılarında. `desen_uret`
+F'leri gerçek desenden ölçülen açılarla çiziyor — azimut 45/135/225/315
+için kendi açıları sırasıyla 0°, 270°, 316°, 90°. Her F'nin imzası:
+
+| azimut | kendi açısı | imza (az−ac) |
+|---|---|---|
+| 45  | 0   | **45** |
+| 135 | 270 | **225** |
+| 225 | 316 | **269** |
+| 315 | 90  | **225** |
+
+**İki F'nin imzası birebir aynı (225).** Yani dört F, birbirinden ayırt
+edilebilir dört işaret DEĞİL — üçü pratik olarak 90° dönmüş kopyalar gibi
+davranıyor. Simetriyi kıran tek işaret azimut 225'teki F (imza 269).
+
+Ve KÖK NEDEN 1'in attığı F çoğu zaman tam da o. İki hata birbirini
+besliyor: eleme simetriyi kıran tek F'yi atınca, geriye kalan üç F 90°
+belirsizliğini aynen koruyor ve şablon eşleşmesi yanlış F'ye oturuyor.
+
+### Ne yapılmalı (sıra önemli)
+
+1. **`find_f_markers` içindeki doluluk elemesini kaldır** (satır ~140-160,
+   `# DOLULUK ELEMESİ` bloğu). Çevre kutusu + alan + en kalabalık alan
+   kümesi zaten yetiyor; doluluk dönmeye duyarlı olduğu için ölçüt olamaz.
+   Halka yayı sızarsa doğru ölçüt **dairesellik/uzunluk-genişlik oranı**
+   olur, doluluk değil.
+2. **Şablon eşleşmesini F KİMLİĞİNE bağla.** Şu an tek şablon her F'ye
+   oturtuluyor ve NCC en iyi hangi dönmede ise o seçiliyor; F'ler farklı
+   açılarda çizildiği için bu yanlış kimliğe oturabiliyor. Dört F'nin
+   dördü için ayrı şablon kesilip GT'deki dört imza bir küme olarak
+   eşlenmeli (birebir atama, 4! = 24 permütasyon; ucuz).
+3. **Gerçek desenin F açılarını doğrula.** İmza tablosundaki 225-225
+   çakışması gerçek desende de varsa, roll TASARIM GEREĞİ tekleşmiyor
+   demektir. O zaman 7I'deki not geçerli kalır: *desenin kendisi
+   değişmeli* — dört F'den birine ikinci bir işaret eklemek yeter.
+   `generate_circle_pattern*.py` bunu üretiyor, orada düzeltilebilir.
+4. Adım 1+2'den sonra `python3 test_f_markers.py` 22/22 olmalı; sonra
+   `core/pipeline.py` + `gui/main_window.py` içindeki `(mod 90°)`
+   gösterimi tam açıya çevrilmeli.
+
+### Gerçek ölçüm ne diyor
+
+[7] bloğu (Hydra + OLED gerçek çifti) ZATEN GEÇİYOR: roll 134.80°,
+homografiyle mod-90 tutarlı (44.80°), ayna EVET, F dağılımı ±0.88°.
+Yani yöntem gerçek veride çalışıyor; kalan 10 hata sentetik testin
+zorladığı köşe durumlarında ve yukarıdaki iki kök nedenden geliyor.
+
 ## 8. OLASI SONRAKİ ADIMLAR (fikir — kullanıcı istemedi)
 
 - Sonuçları PDF/CSV rapor olarak dışa aktarma.
