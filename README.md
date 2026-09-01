@@ -240,7 +240,7 @@ python3 test_hydra.py            # Hydra donanımı uçtan uca
 python3 test_pipeline.py         # Uçtan uca test (örnek görüntülerle)
 python3 test_roi.py              # ROI seçimi
 python3 test_roi_analiz.py       # Tam kare ↔ kırpma karşılaştırması
-python3 test_f_markers.py        # F işaretlerinden tam roll + ayna (24 kontrol)
+python3 test_f_markers.py        # F işaretlerinden tam roll + ayna (32 kontrol)
 ```
 
 Ayrıca modüller doğrudan çalıştırılabilir:
@@ -295,14 +295,31 @@ Bağımsız bir hakem de aynı yönü gösterir: F merkezlerinin **işaretli ala
 (chirality)** GT'de +430775, dedektörde +681105 — ikisi de pozitif, dizilim
 yönü aynı, ayna yok. Bu ölçüt şablon eşleşmesinden tamamen bağımsızdır.
 
-Sentetik doğrulama (`test_f_markers.py`, **24/24**): roll 0 → 0.0°, 134 →
+Sentetik doğrulama (`test_f_markers.py`, **32/32**): roll 0 → 0.0°, 134 →
 133.9°, 225 → 224.6°, 310 → 310.0°; **44° ile 134° ayırt ediliyor** (44.1 vs
 133.9); 1.4×/1.8× ölçek ve kaçık merkezde hata 0.0–1.0°. Gerçek çiftte roll
 **223.30°**, homografinin mod-90 değeriyle tutarlı (223.30 mod 90 = 43.30).
 
-> **Not:** yöntem doğrulandı ve testleri geçiyor, ancak `core/pipeline.py`
-> içinde henüz **bağlanmamış** durumdadır — arayüzde gösterilen roll hâlâ
-> homografiden gelir. Bağlanması bekleyen tek adım budur.
+### Panele bağlı
+
+Yöntem `core/pipeline.py` içinde **bağlıdır**: `measure_pointing` sonrasında
+`solve_roll_and_mirror` çağrılır ve `roll_full_deg` F'lerin verdiği tek
+değerle değiştirilir. Arayüzde `(mod 90°)` eki yerine
+`(F işaretlerinden, 4 işaret)` yazar.
+
+Bağlanma şartı, kodun kendi koyduğu şarttı: dedektör görüntüsü sekiz açıyla
+(0/45/…/315°) döndürülüp yöntem tekrar koşulur ve **sekizinde de** doğru
+çıkmalıdır. Şu an 8/8 geçiyor — hatalar 0.0–0.4°, ayna kararı dönmeden
+etkilenmiyor (`test_f_markers.py` [8]).
+
+**Homografi feda edilmez.** F'ler roll'ü yalnızca *tekleştirir*; sayı
+homografininkiyle simetri modülü içinde tutarlı olmalıdır. İki yol 8°'den
+fazla ayrışırsa F sonucu kullanılmaz ve panel homografinin dürüst
+`(mod 90°)` değerinde kalır — homografi tüm desenden, F'ler dört küçük
+bölgeden gelir.
+
+Uçtan uca (`run_analysis`, gerçek çift): roll **223.300°**, `n_markers` 4,
+tutarsızlık 0.735°, NCC 0.977, ayna YOK.
 
 ## Test deseni üreteçleri
 
