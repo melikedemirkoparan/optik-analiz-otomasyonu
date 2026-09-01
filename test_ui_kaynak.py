@@ -707,6 +707,71 @@ kontrol("sağ panel yeterince geniş açılıyor",
         w15.centralWidget().findChild(type(w15.tabs)) is not None and
         w15.width() > 0)
 
+
+# ---------------------------------------------------------------------------
+print("\n[16] Çözücü özeti: eksiklik ile 'girilmedi' karışmıyor")
+# Ekranda FOV 21.87° hesaplanmışken turuncu "Çözülemeyen: Kullanılabilir FOV,
+# Görüntü dairesi çapı" uyarısı çıkıyordu. O iki büyüklük donanımdan
+# TÜRETİLEMEZ (üretici/datasheet verir); boş kalmaları eksiklik değildir ve
+# uyarı kullanıcıyı FOV hesaplanamadı sanmaya itiyordu.
+import re as _re
+from gui.solver_tab import DISARIDAN_GELEN
+
+def _duz(html):
+    return _re.sub("<[^>]+>", "", html.replace("<br>", "\n"))
+
+w16 = MainWindow()
+w16.f_system.setCurrentIndex(w16.f_system.findData("Hydra yıldız izleyici"))
+w16._apply_system_preset()
+t16 = w16.tab_solver
+t16.btn_panelden.click()
+t16.fields["lens_useful_fov_deg"].clear()      # ekrandaki senaryo
+t16.coz()
+_ozet = _duz(t16.lbl_ozet.text())
+
+kontrol("FOV gerçekten hesaplanıyor",
+        abs(solver.solve(t16.girdiler()).get("fov_x_deg") - 21.8705) < 0.01,
+        "21.8705°")
+kontrol("özet FOV'u ilk satırlarda gösteriyor",
+        "FOV X" in _ozet.split("\n")[1],
+        _ozet.split("\n")[1][:52])
+kontrol("türetilemeyen büyüklük uyarısı YOK",
+        "Türetilemedi" not in _ozet,
+        "yalnızca bilgi satırı var")
+kontrol("dışarıdan gelenler yumuşak dille bildiriliyor",
+        "Girilmedi" in _ozet and "sorun değildir" in _ozet)
+kontrol("üretici FOV dışarıdan-gelen sayılıyor",
+        "lens_useful_fov_deg" in DISARIDAN_GELEN)
+
+# GERÇEK eksiklikte uyarı hâlâ çıkmalı — mesajı yumuşatmak, gerçek
+# boşluğu gizlemek anlamına gelmemeli.
+for _le in t16.fields.values():
+    _le.clear()
+t16.fields["det_pitch_um"].setText("5.5")
+t16.coz()
+kontrol("gerçek eksiklikte uyarı korunuyor",
+        "Türetilemedi" in _duz(t16.lbl_ozet.text()),
+        "tek girdiyle çoğu büyüklük çözülemez")
+
+# Çelişki: aynı büyüklük birden çok kuraldan çelişebilir; kullanıcı için
+# bu TEK tutarsızlıktır ve ham düğüm adı değil etiket görmelidir.
+for _le in t16.fields.values():
+    _le.clear()
+for _k, _v in (("lens_f_mm", "70"), ("det_pitch_um", "5.5"),
+               ("det_w_px", "2048"), ("fov_x_deg", "15.0")):
+    t16.fields[_k].setText(_v)
+t16.coz()
+_c = _duz(t16.lbl_ozet.text())
+kontrol("çelişki bildiriliyor", "ÇELİŞKİ" in _c)
+kontrol("çelişkide insan-okur etiket kullanılıyor",
+        "FOV X" in _c and "fov_x_deg" not in _c,
+        "ham düğüm adı sızmıyor")
+kontrol("çelişki büyüklük başına tekilleştiriliyor",
+        _c.count("FOV X: girdiniz") <= 1,
+        "aynı büyüklük tek kez listeleniyor")
+kontrol("girilen değerin korunduğu söyleniyor",
+        "korundu" in _c)
+
 print(f"SONUÇ: {GECTI} geçti, {KALDI} kaldı")
 print("=" * 72)
 sys.exit(1 if KALDI else 0)

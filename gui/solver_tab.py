@@ -57,6 +57,18 @@ GIRDI_GRUPLARI: list[tuple[str, list[str]]] = [
     ("Zincirler arası", ["scale_expected"]),
 ]
 
+# Yalnızca DIŞARIDAN gelebilecek büyüklükler: üreticinin verdiği ya da
+# ölçülen değerler. Donanım geometrisinden türetilemezler ve boş
+# kalmaları bir EKSİKLİK DEĞİLDİR — o sistemde ilgisiz olabilirler.
+# Bunları "çözülemedi" diye bildirmek kullanıcıyı olmayan bir sorunu
+# aramaya gönderir; ekranda FOV hesaplanmışken "çözülemeyen" uyarısı
+# görmek tam olarak buydu.
+DISARIDAN_GELEN: frozenset[str] = frozenset({
+    "lens_useful_fov_deg",   # üreticinin kullanılabilir FOV'u
+    "lens_image_circle_mm",  # datasheet'te doğrudan verilir
+    "scale_expected",        # görüntüden ölçülür
+})
+
 # Sonuç tablosunda gösterilecek sıra. Girdi olarak sorulmayan türev
 # düğümler (arcsec, yarı-kapsama) burada görünür.
 SONUC_SIRASI: list[str] = [
@@ -307,18 +319,65 @@ class SolverTab(QWidget):
         # ---- Özet ----
         parcalar = [f"<b>{len(given)}</b> girdi → "
                     f"<b style='color:{GOOD}'>{turetilen}</b> değer türetildi."]
-        if res.unresolved:
-            adlar = ", ".join(solver.label(n) for n in res.unresolved[:6])
-            if len(res.unresolved) > 6:
-                adlar += f" (+{len(res.unresolved) - 6})"
+        # En çok aranan büyüklükleri özetin ilk satırında göster. Uzun
+        # tabloda FOV'u aramak zorunda kalmak, "hesaplanmamış" izlenimi
+        # veriyordu — hesaplanmış olduğu hâlde.
+        one_cikan = []
+        for node in ("fov_x_deg", "ifov_x_urad", "lens_f_mm", "scr_ang_deg"):
+            v = res.values.get(node)
+            if v is None or v.is_given:
+                continue
+            one_cikan.append(
+                f"{solver.label(node)} = <b>{_fmt(v.value, node)}</b> "
+                f"{solver.unit(node)}".rstrip())
+        if one_cikan:
             parcalar.append(
-                f"<span style='color:{WARN}'>Çözülemeyen: {adlar}</span> — "
-                "bunlar için yeterli bilinen yok, bir girdi daha gerekiyor.")
+                f"<span style='color:{GOOD}'>" + " · ".join(one_cikan[:3])
+                + "</span>")
+        # Çözülemeyenlerden, DIŞARIDAN gelmesi gereken büyüklükleri ayıkla:
+        # onlar türetilemez, boş kalmaları eksiklik değildir. Kalanlar
+        # gerçekten "bir girdi daha gerekiyor" diyebileceğimiz olanlardır.
+        eksik = [n for n in res.unresolved if n not in DISARIDAN_GELEN]
+        if eksik:
+            adlar = ", ".join(solver.label(n) for n in eksik[:6])
+            if len(eksik) > 6:
+                adlar += f" (+{len(eksik) - 6})"
+            parcalar.append(
+                f"<span style='color:{WARN}'>Türetilemedi: {adlar}</span> — "
+                "bunlar için yeterli bilinen yok; bir girdi daha gerekiyor.")
+        # Dışarıdan gelenler ayrı ve YUMUŞAK bir dille bildirilir: bilgi,
+        # uyarı değil.
+        dis = [n for n in res.unresolved if n in DISARIDAN_GELEN]
+        if dis:
+            parcalar.append(
+                f"<span style='color:{MUTED}'>Girilmedi: "
+                + ", ".join(solver.label(n) for n in dis)
+                + " — bu değerler datasheet'ten ya da ölçümden gelir, "
+                  "donanımdan türetilemez. Boş kalmaları sorun değildir.</span>")
         if res.conflicts:
+            # Aynı büyüklük birden çok kuraldan çelişebilir (FOV hem
+            # sensör boyutundan hem N×IFOV'dan). Kullanıcı için bunlar TEK
+            # bir tutarsızlıktır; hepsini tek tek dökmek okunmaz bir duvar
+            # yapıyordu. Büyüklük başına en büyük sapmayı gösteriyoruz ve
+            # ham düğüm adı yerine insan-okur etiket kullanıyoruz.
+            en_kotu: dict[str, object] = {}
+            for c in res.conflicts:
+                onceki = en_kotu.get(c.name)
+                if onceki is None or c.rel_error > onceki.rel_error:
+                    en_kotu[c.name] = c
+            satir = []
+            for c in sorted(en_kotu.values(), key=lambda x: -x.rel_error)[:3]:
+                satir.append(
+                    f"{solver.label(c.name)}: girdiniz "
+                    f"<b>{_fmt(c.given, c.name)}</b>, diğer değerler "
+                    f"<b>{_fmt(c.derived, c.name)}</b> gerektiriyor "
+                    f"(%{c.rel_error * 100:.1f} fark)")
+            fazla = len(en_kotu) - 3
+            ek = f" (+{fazla} büyüklük daha)" if fazla > 0 else ""
             parcalar.append(
-                f"<span style='color:{BAD}'><b>ÇELİŞKİ:</b> "
-                + "; ".join(c.describe() for c in res.conflicts)
-                + "</span> — girdiğiniz değerlerden en az biri diğerleriyle "
-                  "uyuşmuyor. Girilen değer korundu, üzerine yazılmadı.")
+                f"<span style='color:{BAD}'><b>ÇELİŞKİ</b> — "
+                + "; ".join(satir) + ek
+                + ". Girdiğiniz değerler korundu, üzerine yazılmadı; "
+                  "hangisinin yanlış olduğuna siz karar verin.</span>")
         self.lbl_ozet.setText("<br>".join(parcalar))
         self.lbl_ozet.setStyleSheet("font-size:12px;")
