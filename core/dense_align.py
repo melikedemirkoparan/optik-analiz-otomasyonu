@@ -903,6 +903,152 @@ def _fit_radial_model(res: ResidualResult, rmax: float,
 
 
 # --------------------------------------------------------------------------
+# 2B. Kademe — ÖLÇÜME GİREN BÖLGE (hizalamayı GT'nin tamamıyla yapma)
+# --------------------------------------------------------------------------
+#
+# ECC'nin şablonu ground truth'un TAMAMIDIR ve şablonun her pikseli
+# korelasyon katsayısına tam ağırlıkla girer. Oysa GT'nin büyük bir kısmı
+# ölçüme hiç katılmaz:
+#
+#   * dedektöre DÜŞMEYEN kısım — kadraj dışında kalır, karşılığı yoktur;
+#   * DESEN İÇERMEYEN kısım — referans ekranın boş kenarı, sabit bir zemin.
+#
+# Ölçülen bir çiftte (STOS deseni, CMV4000): GT 1280×1024, deseni taşıyan
+# daire r=404 (çerçevenin %39'u), dedektöre düşen bölge çerçevenin %81'i.
+# Yani şablonun %61'i sabit siyah. Sabit bölge korelasyonun payına hiç
+# katkı vermez ama paydasında durur; hedef fonksiyonu düzleştirir.
+#
+# Bu kademe, hizalamayı bu iki kısıtın KESİŞİMİNDE tekrar çözer. Bölge
+# ölçülmüş homografiden çıkar (dedektöre düşen kısım ancak H bilinince
+# belli olur), o yüzden ikinci geçiştir — birinci geçiş bölgeyi bulmak
+# için, ikincisi orada çözmek için.
+
+
+def content_bbox(img: np.ndarray, pad: int = WINSIZE) -> tuple | None:
+    """
+    Desenin kapladığı kutu (x, y, w, h) — zeminden sapan pikseller.
+
+    Eşik ZEMİNDEN SAPMA üzerinden kurulur, parlaklık üzerinden değil:
+    desen siyah zeminde beyaz da olabilir (v6_inverted), beyaz zeminde
+    siyah da. Medyan zemin kabul edilir, ondan belirgin sapan her piksel
+    içerik sayılır.
+    """
+    a = img.astype(np.float32)
+    bg = float(np.median(a))
+    lo, hi = np.percentile(a, (1.0, 99.0))
+    thr = max(8.0, 0.15 * float(hi - lo))
+    ink = np.abs(a - bg) > thr
+    if not ink.any():
+        return None
+    ys, xs = np.nonzero(ink)
+    x0, x1 = int(xs.min()) - pad, int(xs.max()) + 1 + pad
+    y0, y1 = int(ys.min()) - pad, int(ys.max()) + 1 + pad
+    h, w = img.shape[:2]
+    x0, y0 = max(0, x0), max(0, y0)
+    x1, y1 = min(w, x1), min(h, y1)
+    if x1 - x0 < 16 or y1 - y0 < 16:
+        return None
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
+def visible_bbox(gt_shape: tuple, det_shape: tuple,
+                 H: np.ndarray, pad: int = WINSIZE) -> tuple | None:
+    """
+    Dedektör çerçevesinin GT'deki karşılığının kutusu (x, y, w, h).
+
+    Dedektörün dört köşesi H^-1 ile GT'ye taşınır; GT çerçevesiyle
+    kesiştirilen bölgenin kutusu döner. GT'nin bu kutunun dışında kalan
+    kısmı hiçbir dedektör pikseline karşılık gelmez.
+    """
+    if H is None or not np.all(np.isfinite(H)):
+        return None
+    try:
+        Hinv = np.linalg.inv(np.asarray(H, dtype=np.float64))
+    except np.linalg.LinAlgError:
+        return None
+    dh, dw = float(det_shape[0]), float(det_shape[1])
+    corners = np.array([[[0.0, 0.0]], [[dw, 0.0]], [[dw, dh]], [[0.0, dh]]],
+                       dtype=np.float64)
+    try:
+        back = cv2.perspectiveTransform(corners, Hinv).reshape(-1, 2)
+    except cv2.error:                                       # noqa: BLE001
+        return None
+    if not np.all(np.isfinite(back)):
+        return None
+    gh, gw = gt_shape[0], gt_shape[1]
+    x0 = max(0, int(np.floor(back[:, 0].min())) - pad)
+    y0 = max(0, int(np.floor(back[:, 1].min())) - pad)
+    x1 = min(gw, int(np.ceil(back[:, 0].max())) + pad)
+    y1 = min(gh, int(np.ceil(back[:, 1].max())) + pad)
+    if x1 - x0 < 16 or y1 - y0 < 16:
+        return None
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
+def measurable_region(gt: np.ndarray, det_shape: tuple, H: np.ndarray,
+                      min_gain: float = 0.05) -> tuple | None:
+    """
+    Hizalamanın gerçekten yapılması gereken GT bölgesi:
+    (dedektöre düşen kutu) ∩ (desen içeren kutu).
+
+    `min_gain`: kırpma GT alanının bu kadarını atmıyorsa None döner —
+    ikinci bir ECC koşusu bedava değil, kazanç yoksa koşulmaz.
+    """
+    gh, gw = gt.shape[:2]
+    boxes = [b for b in (visible_bbox(gt.shape, det_shape, H),
+                         content_bbox(gt)) if b is not None]
+    if not boxes:
+        return None
+    x0 = max(b[0] for b in boxes)
+    y0 = max(b[1] for b in boxes)
+    x1 = min(b[0] + b[2] for b in boxes)
+    y1 = min(b[1] + b[3] for b in boxes)
+    if x1 - x0 < 16 or y1 - y0 < 16:
+        return None
+    if (x1 - x0) * (y1 - y0) > (1.0 - min_gain) * gw * gh:
+        return None
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
+def _score_on_region(gt: np.ndarray, det: np.ndarray, H: np.ndarray,
+                     box: tuple) -> float:
+    """
+    İki homografiyi KARŞILAŞTIRILABİLİR biçimde puanlar.
+
+    ECC korelasyonu bunun için kullanılamaz: kırpılmış şablonun korelasyonu
+    kırpılmamışınkiyle aynı şeyi ölçmez (payda değişir), kırpılmış olan
+    neredeyse her zaman yüksek çıkar. Bu yüzden her iki aday da SABİT bir
+    bölgede — ölçüme giren kutuda — aynı NCC ile puanlanır.
+    """
+    if H is None or not np.all(np.isfinite(H)):
+        return -1.0
+    x, y, w, h = box
+    sub = gt[y:y + h, x:x + w]
+    T = np.array([[1.0, 0.0, x], [0.0, 1.0, y], [0.0, 0.0, 1.0]])
+    return _score_alignment(sub, det, np.asarray(H, dtype=np.float64) @ T)
+
+
+def refine_on_region(gt: np.ndarray, det: np.ndarray, H: np.ndarray,
+                     box: tuple, **kw) -> RefineResult:
+    """
+    ECC'yi yalnızca `box` bölgesiyle tekrar koşar; sonucu TAM GT
+    koordinatlarına geri çevirir.
+
+    Kırpma koordinat sistemini kaydırdığı için homografi öteleme matrisiyle
+    sarılır:  H_tam = H_kırpık · T^-1,  T = kırpık -> tam ötelemesi.
+    Bu sarma unutulursa homografi kutunun köşesi kadar kayar ve decenter
+    tamamen yanlış çıkar.
+    """
+    x, y, w, h = box
+    sub = gt[y:y + h, x:x + w]
+    T = np.array([[1.0, 0.0, x], [0.0, 1.0, y], [0.0, 0.0, 1.0]])
+    res = refine_ecc(sub, det, init=np.asarray(H, dtype=np.float64) @ T, **kw)
+    if res.homography is not None:
+        res.homography = res.homography @ np.linalg.inv(T)
+    return res
+
+
+# --------------------------------------------------------------------------
 # Tam zincir — tek çağrı
 # --------------------------------------------------------------------------
 
@@ -924,6 +1070,14 @@ class DenseResult:
     # Böyle bir desende roll ancak `rotation_modulus_deg` modülünde
     # bilinebilir — bu bir ölçüm eksikliği değil, desenin sınırıdır.
     symmetry_order: int = 1
+    # Ölçüme giren bölge (bkz. 2B kademesi): hizalamanın gerçekten
+    # yapıldığı GT kutusu (x, y, w, h) ve ikinci geçişin benimsenip
+    # benimsenmediği. `region_used` False ise homografi GT'nin tamamıyla
+    # çözülmüş demektir.
+    region_box: tuple = ()
+    region_used: bool = False
+    region_score_before: float = float("nan")
+    region_score_after: float = float("nan")
     messages: list[str] = field(default_factory=list)
 
     @property
@@ -967,8 +1121,37 @@ def analyze_dense(gt: np.ndarray, det: np.ndarray,
 
     Girdi olarak dosya yolu değil GRİ DİZİ alır — çağıran taraf görüntüyü
     zaten yüklemiş olur ve geçici dosya yazmak gerekmez.
+
+    HİZALAMA GT'NİN TAMAMIYLA YAPILMAZ. İki kısıt uygulanır (bkz. 2B):
+    desen içermeyen kenar en baştan atılır, dedektöre düşmeyen kısım ise
+    homografi bir kez çözüldükten sonra atılıp hizalama tekrarlanır.
     """
     res = DenseResult()
+
+    # --- 0. Şablonu desenin kapladığı kutuya indir ---
+    #
+    # Bu kırpma homografi GEREKTİRMEZ — yalnızca GT'nin kendi içeriğine
+    # bakar — o yüzden kaba kademeden ÖNCE yapılabilir. Kazancı da orada:
+    # kaba kademe genlik spektrumu üzerinden çalışır ve boş bir çerçeve
+    # kenarı spektrumu domine eder. Ölçülen çiftte GT'nin %61'i sabit
+    # siyahtı; o kısım ne ölçeğe ne dönmeye bilgi taşır.
+    #
+    # Homografi kırpılmış şablon için çözülür ve EN SONDA tam GT
+    # koordinatlarına geri çevrilir (H_tam = H_kırpık · T0^-1).
+    gt_full = gt
+    T0 = np.eye(3, dtype=np.float64)
+    box0 = content_bbox(gt)
+    if box0 is not None and box0[2] * box0[3] < 0.95 * gt.shape[0] * gt.shape[1]:
+        _x, _y, _w, _h = box0
+        gt = gt[_y:_y + _h, _x:_x + _w]
+        T0 = np.array([[1.0, 0.0, _x], [0.0, 1.0, _y], [0.0, 0.0, 1.0]])
+        res.messages.append(
+            f"Bilgi: ground truth deseninin kapladığı kutuya kırpıldı "
+            f"({_w}×{_h} px, çerçevenin "
+            f"%{100.0 * _w * _h / (gt_full.shape[0] * gt_full.shape[1]):.0f}'i) "
+            f"— boş kenar hizalamaya girmiyor.")
+    else:
+        box0 = None
 
     # Ayna varyantı seçimi ECC'YE bırakılır, kaba kademeye değil.
     #
@@ -1014,6 +1197,56 @@ def analyze_dense(gt: np.ndarray, det: np.ndarray,
     _cc, res.coarse, res.refine, det_v = best
     res.messages.extend(res.coarse.messages)
     res.messages.extend(res.refine.messages)
+
+    # --- 2B. ÖLÇÜME GİREN BÖLGEDE YENİDEN ÇÖZ ---
+    #
+    # Birinci geçiş GT'nin tamamıyla yapıldı — mecburen, çünkü hangi GT
+    # bölgesinin dedektöre düştüğü ancak homografi bilinince belli olur.
+    # Artık belli: bölge hesaplanır ve hizalama ORADA tekrar çözülür.
+    #
+    # Benimseme ölçütü ECC korelasyonu DEĞİLDİR — kırpılmış şablonun
+    # korelasyonu kırpılmamışınkiyle karşılaştırılamaz (bkz.
+    # `_score_on_region`). İki aday da sabit bölgede aynı NCC ile
+    # puanlanır ve ikinci geçiş yalnızca KESİN olarak iyileştiriyorsa
+    # benimsenir; aksi hâlde birinci geçişin sonucu korunur.
+    box = measurable_region(gt, det_v.shape, res.refine.homography)
+    if box is not None:
+        res.region_box = tuple(int(v) for v in box)
+        before = _score_on_region(gt, det_v, res.refine.homography, box)
+        r2 = refine_on_region(gt, det_v, res.refine.homography, box)
+        after = _score_on_region(gt, det_v, r2.homography, box)
+        res.region_score_before, res.region_score_after = (
+            float(before), float(after))
+        gw_, gh_ = gt.shape[1], gt.shape[0]
+        oran = 100.0 * box[2] * box[3] / float(gw_ * gh_)
+        if r2.homography is not None and after > before + 1e-6:
+            r2.variant = res.refine.variant
+            res.refine = r2
+            res.region_used = True
+            res.messages.append(
+                f"Bilgi: hizalama ground truth'un ölçüme giren kısmıyla "
+                f"({box[2]}×{box[3]} px, çerçevenin %{oran:.0f}'i) yeniden "
+                f"çözüldü — örtüşme skoru {before:.4f} → {after:.4f}.")
+        else:
+            res.messages.append(
+                f"Bilgi: ölçüme giren bölgeyle ({box[2]}×{box[3]} px) ikinci "
+                f"geçiş denendi ama iyileştirmedi ({before:.4f} → "
+                f"{after:.4f}); tam kareyle çözülen homografi korundu.")
+
+    # --- 2C. Homografiyi TAM GT koordinatlarına geri çevir ---
+    #
+    # Buradan sonrası (tilt ayrıştırması, kalıntı, çağıranın `pointing`
+    # çağrısı) tam GT'yi varsayar. Dönüşüm burada yapılır, tilt
+    # ayrıştırmasından ÖNCE: homografinin perspektif satırı öteleme ile
+    # sarıldığında değişir, dolayısıyla ayrıştırma hangi koordinatta
+    # yapıldığına duyarlıdır.
+    if box0 is not None:
+        _T0inv = np.linalg.inv(T0)
+        if res.refine.homography is not None:
+            res.refine.homography = res.refine.homography @ _T0inv
+        if res.region_box:
+            _rx, _ry, _rw, _rh = res.region_box
+            res.region_box = (_rx + box0[0], _ry + box0[1], _rw, _rh)
 
     # Desenin kendi dönme simetrisi — belirsizliği DOĞRU teşhis etmek için
     # gerekli (aşağıya bakınız).
@@ -1077,7 +1310,7 @@ def analyze_dense(gt: np.ndarray, det: np.ndarray,
     if with_residual:
         # `det_v` varyantı ZATEN uygulanmış görüntüdür; burada variant="raw"
         # verilmezse ayna ikinci kez uygulanır ve kalıntı tamamen bozulur.
-        res.residual = residual_flow(gt, det_v, res.refine.homography,
+        res.residual = residual_flow(gt_full, det_v, res.refine.homography,
                                      variant="raw", center=center)
         res.messages.extend(res.residual.messages)
 

@@ -414,6 +414,71 @@ def test_artifact_not_called_distortion():
     return fails
 
 
+def test_measurable_region():
+    """
+    [8] ÖLÇÜME GİREN BÖLGE — hizalama GT'nin tamamıyla yapılmamalı.
+
+    GT'nin büyük bölümü boş kenar ve dedektöre düşmeyen alan olduğunda
+    hizalama o kısımlarla çözülmemeli. Asıl risk KOORDİNAT KAYMASIDIR:
+    kırpılmış şablonla çözülen homografi tam GT koordinatlarına geri
+    çevrilmezse kutunun köşesi kadar kayar ve decenter tamamen yanlış
+    çıkar. Test bunu bilinen bir dönüşümle sınar.
+    """
+    print("\n[8] ÖLÇÜME GİREN BÖLGE (kırpılmış şablon, tam koordinat)")
+    fails = []
+    rng = np.random.default_rng(11)
+
+    # Ortada desen, çevresinde geniş boş kenar olan bir GT.
+    n = 900
+    gt = np.zeros((n, n), np.uint8)
+    pat = cv2.GaussianBlur(rng.random((300, 300)).astype(np.float32), (0, 0), 2)
+    pat = ((pat - pat.min()) / max(pat.ptp(), 1e-9) * 255).astype(np.uint8)
+    gt[300:600, 300:600] = pat
+
+    box = da.content_bbox(gt)
+    good = box is not None and box[0] <= 300 and box[1] <= 300 \
+        and box[0] + box[2] >= 600 and box[1] + box[3] >= 600 \
+        and box[2] * box[3] < 0.35 * n * n
+    print(f"  content_bbox = {box}  (desen 300..600, çerçeve {n}×{n})   {ok(good)}")
+    if not good:
+        fails.append("content_bbox")
+
+    # Bilinen benzerlik: 1.4 kat büyütme + kaydırma.
+    M = np.array([[1.4, 0.0, -180.0], [0.0, 1.4, -140.0], [0.0, 0.0, 1.0]])
+    det = cv2.warpPerspective(gt, M, (760, 760))
+
+    r = da.analyze_dense(gt, det, try_mirrors=False)
+    if r.homography is None:
+        print("  hizalama çözülemedi   HATA")
+        return fails + ["hizalama"]
+
+    # Homografi TAM GT koordinatlarında mı: desenin merkezini taşıyıp
+    # bilinen hedefle karşılaştır. Kırpma telafi edilmemişse bu ~300 px
+    # kayar — tolerans onun çok altında.
+    src = np.array([[[450.0, 450.0]]])
+    got = cv2.perspectiveTransform(src, r.homography)[0, 0]
+    want = cv2.perspectiveTransform(src, M)[0, 0]
+    err = float(np.hypot(*(got - want)))
+    good = err < 1.5
+    print(f"  merkez taşıma: ölçülen ({got[0]:.1f}, {got[1]:.1f})  "
+          f"beklenen ({want[0]:.1f}, {want[1]:.1f})  hata {err:.2f} px   {ok(good)}")
+    if not good:
+        fails.append("koordinat telafisi")
+
+    A = np.asarray(r.homography)[:2, :2]
+    sc = float(np.sqrt(abs(np.linalg.det(A))))
+    good = abs(sc - 1.4) < 0.02
+    print(f"  ölçek: {sc:.4f}  (gerçek 1.4000)   {ok(good)}")
+    if not good:
+        fails.append("ölçek")
+
+    kirpildi = any("kapladığı kutuya kırpıldı" in m for m in r.messages)
+    print(f"  boş kenar hizalamaya girmedi: {kirpildi}   {ok(kirpildi)}")
+    if not kirpildi:
+        fails.append("kırpma uygulanmadı")
+    return fails
+
+
 def main():
     print("=" * 62)
     print("YOĞUN (DENSE) HİZALAMA DOĞRULAMASI")
@@ -427,6 +492,7 @@ def main():
     all_fails["SIFT karşılaştırması"] = test_vs_sift()
     all_fails["bilgisiz girdi"] = test_degenerate_input()
     all_fails["artefakt ayrımı"] = test_artifact_not_called_distortion()
+    all_fails["ölçüme giren bölge"] = test_measurable_region()
 
     print("\n" + "=" * 62)
     bad = {k: v for k, v in all_fails.items() if v}

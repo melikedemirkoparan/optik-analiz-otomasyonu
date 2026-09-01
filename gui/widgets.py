@@ -9,7 +9,7 @@ from PyQt5.QtCore import Qt, QPoint, QRect, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QFont, QPen, QColor
 from PyQt5.QtWidgets import (
     QLabel, QWidget, QVBoxLayout, QHBoxLayout, QFrame, QSizePolicy,
-    QScrollArea,
+    QScrollArea, QDoubleSpinBox,
 )
 
 
@@ -235,6 +235,40 @@ class ImageView(QLabel):
 # Kaynak rozeti renkleri. Bir sayının NEREDEN geldiği, sayının kendisi kadar
 # önemlidir: datasheet'ten okunan bir değerle başka değerlerden türetilen bir
 # değer aynı güvene sahip değildir ve kullanıcı ikisini ayırt edebilmelidir.
+class BlankableDoubleSpin(QDoubleSpinBox):
+    """
+    Boş bırakılabilen sayı alanı — boş = BİLİNMİYOR.
+
+    NEDEN VAR
+    ---------
+    Normal `QDoubleSpinBox` boş bırakılamaz: alanı silseniz bile minimuma
+    döner. Ama bu projede boşluk BİLGİ taşıyor — "odak uzaklığını bilmiyorum,
+    sen hesapla" demenin tek yolu o alanı boş bırakmaktır.
+
+    Alt sınır 0'dır ve 0 "verilmedi" anlamına gelir (config.py'deki
+    konvansiyonun aynısı). 0 iken kutuda sayı değil `placeholder` görünür,
+    böylece "0 mm'lik bir lens" ile "bilinmeyen lens" karışmaz.
+    """
+
+    def __init__(self, hi: float, dec: int, suffix: str,
+                 placeholder: str = "bilinmiyor", parent=None):
+        super().__init__(parent)
+        self._suffix = suffix
+        self._ph = placeholder
+        self.setRange(0.0, hi)
+        self.setDecimals(dec)
+        self.setButtonSymbols(QDoubleSpinBox.NoButtons)
+        self.setSpecialValueText(placeholder)   # 0 iken bunu göster
+        self.setSuffix(suffix)
+
+    # 0 (= special value) iken Qt suffix'i de gizler; bu doğru davranış.
+    def bos_mu(self) -> bool:
+        return self.value() <= 0.0
+
+    def temizle(self):
+        self.setValue(0.0)
+
+
 SRC_GIVEN = "#7c8798"      # datasheet / kullanıcı girdisi — nötr
 SRC_DERIVED = "#c9a0ff"    # türetildi — dikkat çeksin ama alarm olmasın
 
@@ -281,6 +315,14 @@ class ResultRow(QWidget):
         self._unit.setStyleSheet(f"color:{MUTED};")
         self._unit.setMinimumWidth(58)
 
+        # Yerleşim: etiket esner, SAYI ESNEMEZ ama kırpılmasına da izin
+        # verilmez. Eskiden etiket tek başına stretch alıyordu; dar panelde
+        # sayının yerini yiyip "0 × 9.200" ya da yalnızca "(-0.64%)" gibi
+        # yarım değerler görünüyordu — sonuç panelinde en kritik hata bu,
+        # çünkü yanlış okunan sayı sessizce yanlış karara götürür.
+        self._label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._value.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+        self._value.setMinimumWidth(96)
         lay.addWidget(self._label, 1)
         lay.addWidget(self._badge, 0)
         lay.addWidget(self._value, 0)
@@ -296,7 +338,8 @@ class ResultRow(QWidget):
 
         `kind`:
           * ``"given"``   — datasheet ya da kullanıcı girdisi
-          * ``"derived"`` — başka değerlerden hesaplandı
+          * ``"unit"``    — aynı değerin başka birimde yazılışı
+          * ``"derived"`` — gerçek bir bağıntıyla hesaplandı
           * ``None``      — rozet gizlenir (kaynak bilinmiyor/anlamsız)
 
         `detail` rozetin ipucu metnidir; türetilmiş değerlerde türetim
@@ -311,6 +354,10 @@ class ResultRow(QWidget):
             return
         if kind == "given":
             metin, renk = "datasheet", SRC_GIVEN
+        elif kind == "unit":
+            # Birim çevrimi yeni bilgi değil — aynı sayının başka yazılışı.
+            # "türetildi" demek hesap yapılmış izlenimi verirdi.
+            metin, renk = "birim", SRC_GIVEN
         else:
             metin, renk = "türetildi", SRC_DERIVED
         self._badge.setText(metin)

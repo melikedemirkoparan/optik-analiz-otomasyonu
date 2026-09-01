@@ -280,6 +280,29 @@ def _build_rules(model: str = "rectilinear") -> list[Rule]:
     add("köşegen", ["det_w_mm", "det_h_mm"], "det_diag_mm",
         lambda w, h: math.hypot(w, h), lambda w, h: _pos(w, h),
         formula="köşegen = √(genişlik² + yükseklik²)")
+    # Ters yön: datasheet çoğu zaman YALNIZCA köşegeni verir ("1/1.8\"").
+    # Diğer kenar biliniyorsa Pisagor geri çözülür. Guard köşegenin
+    # kenardan büyük olmasını şart koşar; değilse karekök negatife düşer.
+    add("köşegenden genişlik", ["det_diag_mm", "det_h_mm"], "det_w_mm",
+        lambda d, h: math.sqrt(d * d - h * h),
+        lambda d, h: _pos(d, h) and d > h,
+        formula="genişlik = √(köşegen² − yükseklik²)")
+    add("köşegenden yükseklik", ["det_diag_mm", "det_w_mm"], "det_h_mm",
+        lambda d, w: math.sqrt(d * d - w * w),
+        lambda d, w: _pos(d, w) and d > w,
+        formula="yükseklik = √(köşegen² − genişlik²)")
+    # Kare sensörde köşegen tek başına yeter: G = Y = köşegen/√2. Piksel
+    # sayıları eşitse sensör karedir (pitch de kare varsayılır).
+    add("kare sensörde köşegenden kenar",
+        ["det_diag_mm", "det_w_px", "det_h_px"], "det_w_mm",
+        lambda d, nw, nh: d / math.sqrt(2.0),
+        lambda d, nw, nh: _pos(d, nw, nh) and abs(nw - nh) < 0.5,
+        formula="kare sensör: genişlik = köşegen / √2")
+    add("kare sensörde köşegenden kenar",
+        ["det_diag_mm", "det_w_px", "det_h_px"], "det_h_mm",
+        lambda d, nw, nh: d / math.sqrt(2.0),
+        lambda d, nw, nh: _pos(d, nw, nh) and abs(nw - nh) < 0.5,
+        formula="kare sensör: yükseklik = köşegen / √2")
 
     # ---------------- Lens ----------------
     # D = f / N — üç yönde.
@@ -337,6 +360,15 @@ def _build_rules(model: str = "rectilinear") -> list[Rule]:
     add("arcsec → µrad", ["ifov_x_arcsec"], "ifov_x_urad",
         lambda s: math.radians(s / 3600.0) * 1e6, _pos,
         formula="µrad = ″/px / 3600 × π/180 × 1e6")
+    # Y ekseni için de derece karşılığı — X'te var, Y'de yoktu. Asimetri
+    # kullanıcı tarafında "neden X için °/px görüyorum da Y için görmüyorum"
+    # sorusu doğuruyordu; fiziksel bir sebebi yok, eksiklikti.
+    add("µrad → derece", ["ifov_y_urad"], "ifov_y_deg",
+        lambda u: math.degrees(u * 1e-6), _pos,
+        formula="°/px = µrad × 1e-6 × 180/π")
+    add("derece → µrad", ["ifov_y_deg"], "ifov_y_urad",
+        lambda d: math.radians(d) * 1e6, _pos,
+        formula="µrad = °/px × π/180 × 1e6")
     add("µrad → arcsec", ["ifov_y_urad"], "ifov_y_arcsec",
         lambda u: math.degrees(u * 1e-6) * 3600.0, _pos,
         formula="″/px = µrad × 1e-6 × 180/π × 3600")
@@ -450,6 +482,14 @@ def _build_rules(model: str = "rectilinear") -> list[Rule]:
     add("aktif alandan ekran piksel sayısı", ["scr_aw_mm", "scr_pitch_um"], "scr_w_px",
         lambda mm, p: mm * 1000.0 / p, lambda mm, p: _pos(mm, p),
         formula="N = aktif_G / pitch")
+    # Dikey karşılıkları — yatayda üç yön de yazılıyken dikeyde yalnızca
+    # "aktif alan" yönü vardı.
+    add("aktif alandan ekran pitch", ["scr_ah_mm", "scr_h_px"], "scr_pitch_um",
+        lambda mm, n: mm * 1000.0 / n, lambda mm, n: _pos(mm, n),
+        formula="pitch = aktif_Y / N")
+    add("aktif alandan ekran piksel sayısı", ["scr_ah_mm", "scr_pitch_um"], "scr_h_px",
+        lambda mm, p: mm * 1000.0 / p, lambda mm, p: _pos(mm, p),
+        formula="N = aktif_Y / pitch")
 
     # Ekranın açısal kapsaması: yarı genişliğin gördüğü açı (TAN tabanlı).
     add("ekran kapsaması", ["scr_w_px", "scr_ang_deg"], "scr_half_x_deg",
@@ -462,11 +502,37 @@ def _build_rules(model: str = "rectilinear") -> list[Rule]:
             (n / 2.0) * math.tan(math.radians(a)))),
         lambda n, a: _pos(n) and _angle_ok(a),
         formula="yarı_Y = atan( (N/2) × tan(°/px) )")
+    add("kapsamadan °/px", ["scr_half_y_deg", "scr_h_px"], "scr_ang_deg",
+        lambda h, n: math.degrees(math.atan(
+            math.tan(math.radians(h)) / (n / 2.0))),
+        lambda h, n: _angle_ok(h) and _pos(n),
+        formula="°/px = atan( tan(yarı_Y) / (N/2) )")
     add("kapsamadan °/px", ["scr_half_x_deg", "scr_w_px"], "scr_ang_deg",
         lambda h, n: math.degrees(math.atan(
             math.tan(math.radians(h)) / (n / 2.0))),
         lambda h, n: _angle_ok(h) and _pos(n),
         formula="°/px = atan( tan(yarı_X) / (N/2) )")
+
+    # ---------------- Görüntü dairesi (üreticinin kullanılabilir FOV'u) ----
+    # `useful_fov_deg` ÜRETİCİNİN VERDİĞİ bir sayıdır — türetilmiş değil,
+    # datasheet girdisidir. Çözücüye tanıtılmazsa arayüz o satırı başka bir
+    # yoldan hesaplayıp "türetildi" diye etiketler; oysa kullanıcı onu kendi
+    # girmiştir. Rozetin doğru olması için düğümün burada var olması şart.
+    add("görüntü dairesi = 2f·tan(FOV_kull/2)",
+        ["lens_f_mm", "lens_useful_fov_deg"], "lens_image_circle_mm",
+        lambda f, fov: proj.sensor_mm_for_fov(model, f, fov),
+        lambda f, fov: _pos(f) and _angle_ok(fov / 2.0),
+        formula="çap = 2 · " + fwd.format(t="FOV_kullanılabilir/2"))
+    add("kullanılabilir FOV = daireden",
+        ["lens_f_mm", "lens_image_circle_mm"], "lens_useful_fov_deg",
+        lambda f, d: proj.full_fov_deg(model, f, d),
+        lambda f, d: _pos(f, d),
+        formula="FOV_kullanılabilir = " + inv_fmt("çap/2", "çap"))
+    add("f = daire/FOV_kull",
+        ["lens_image_circle_mm", "lens_useful_fov_deg"], "lens_f_mm",
+        lambda d, fov: proj.focal_for_fov_mm(model, d, fov),
+        lambda d, fov: _pos(d) and _angle_ok(fov / 2.0),
+        formula="çap/2 = " + fwd.format(t="FOV_kullanılabilir/2") + "   →   f çözülür")
 
     # ---------------- Zincirler arası: beklenen ölçek ----------------
     # §7E'deki çapraz doğrulama. Ekranın bir pikseli dedektörde kaç piksel:
@@ -485,6 +551,15 @@ def _build_rules(model: str = "rectilinear") -> list[Rule]:
         lambda s, pd, fs, ps: s * (fs / _mm(ps)) * _mm(pd),
         lambda s, pd, fs, ps: _pos(s, pd, fs, ps),
         formula="f_lens = ölçek × (f_ekran / pitch_ekran) × pitch_det")
+    # Tersinin tersi: ölçek ölçüldüyse ve LENS tarafı biliniyorsa ekranın
+    # ima ettiği f çıkar — oradan da °/px. Kullanıcının asıl sorduğu yön
+    # budur: "0.027 °/px elimde yok, FOV ve donanımdan bul".
+    add("ölçekten ekran f",
+        ["scale_expected", "lens_f_mm", "det_pitch_um", "scr_pitch_um"],
+        "scr_f_mm",
+        lambda s, fl, pd, ps: (fl / _mm(pd)) / s * _mm(ps),
+        lambda s, fl, pd, ps: _pos(s, fl, pd, ps),
+        formula="f_ekran = (f_lens / pitch_det) / ölçek × pitch_ekran")
 
     return R
 
@@ -508,6 +583,8 @@ NODE_LABELS: dict[str, str] = {
     "lens_f_mm": "Lens odak uzaklığı f",
     "lens_fnum": "Diyafram f/#",
     "lens_pupil_mm": "Giriş pupili çapı",
+    "lens_useful_fov_deg": "Kullanılabilir FOV (üretici)",
+    "lens_image_circle_mm": "Görüntü dairesi çapı",
     "det_pitch_um": "Dedektör piksel pitch X",
     "det_pitch_y_um": "Dedektör piksel pitch Y",
     "det_w_px": "Dedektör genişlik",
@@ -519,6 +596,7 @@ NODE_LABELS: dict[str, str] = {
     "ifov_y_urad": "IFOV Y",
     "ifov_x_deg": "IFOV X (derece)",
     "ifov_x_arcsec": "IFOV X (arcsec)",
+    "ifov_y_deg": "IFOV Y (derece)",
     "ifov_y_arcsec": "IFOV Y (arcsec)",
     "fov_x_deg": "FOV X",
     "fov_y_deg": "FOV Y",
@@ -537,11 +615,13 @@ NODE_LABELS: dict[str, str] = {
 
 NODE_UNITS: dict[str, str] = {
     "lens_f_mm": "mm", "lens_pupil_mm": "mm", "lens_fnum": "",
+    "lens_useful_fov_deg": "°", "lens_image_circle_mm": "mm",
     "det_pitch_um": "µm", "det_pitch_y_um": "µm",
     "det_w_px": "px", "det_h_px": "px",
     "det_w_mm": "mm", "det_h_mm": "mm", "det_diag_mm": "mm",
     "ifov_x_urad": "µrad/px", "ifov_y_urad": "µrad/px",
-    "ifov_x_deg": "°/px", "ifov_x_arcsec": "″/px", "ifov_y_arcsec": "″/px",
+    "ifov_x_deg": "°/px", "ifov_y_deg": "°/px",
+    "ifov_x_arcsec": "″/px", "ifov_y_arcsec": "″/px",
     "fov_x_deg": "°", "fov_y_deg": "°", "fov_diag_deg": "°",
     "scr_pitch_um": "µm", "scr_w_px": "px", "scr_h_px": "px",
     "scr_aw_mm": "mm", "scr_ah_mm": "mm",
@@ -549,6 +629,28 @@ NODE_UNITS: dict[str, str] = {
     "scr_half_x_deg": "°", "scr_half_y_deg": "°",
     "scale_expected": "×",
 }
+
+
+# Yalnızca BİRİM DÖNÜŞÜMÜ yapan kurallar. Bunların çıktısı matematiksel
+# olarak yeni bir bilgi değildir — aynı büyüklüğün başka birimde yazılışıdır.
+# 78.57 µrad/px ile 16.207 ″/px aynı ölçümdür; ikincisine "türetildi"
+# demek kullanıcıya hesap yapılmış izlenimi verir, oysa yapılan tek şey
+# çarpandır. Rozet mantığı bu kümeye bakarak karar verir.
+BIRIM_KURALLARI: frozenset[str] = frozenset({
+    "µrad → derece", "derece → µrad",
+    "µrad → arcsec", "arcsec → µrad",
+})
+
+
+def sadece_birim_mi(v: "Value") -> bool:
+    """
+    Bu değer yalnızca birim çevrilerek mi elde edildi?
+
+    Zincirin TAMAMI birim dönüşümüyse True. Araya gerçek bir optik bağıntı
+    girmişse (ör. IFOV önce f ve pitch'ten hesaplanıp sonra arcsec'e
+    çevrildiyse) False — o zaman değer gerçekten türetilmiştir.
+    """
+    return (not v.is_given) and v.rule in BIRIM_KURALLARI
 
 
 def label(node: str) -> str:
@@ -586,6 +688,40 @@ class SolveResult:
     def is_derived(self, node: str) -> bool:
         v = self.values.get(node)
         return v is not None and not v.is_given
+
+    def kaynak_turu(self, node: str) -> str:
+        """
+        Rozet için kaynak sınıfı: "given" | "derived" | "unit".
+
+        * given   — kullanıcı/datasheet girdisi
+        * unit    — aynı değerin başka birimde yazılışı (yeni bilgi değil)
+        * derived — gerçek bir optik bağıntıyla hesaplandı
+
+        "unit" ayrımı olmadan arayüz her birim çevrimine "türetildi" basıyor
+        ve rozet anlamını yitiriyor: ekranın yarısı türetildi olunca
+        kullanıcı hangi sayının gerçekten hesaplandığını göremiyor.
+        """
+        v = self.values.get(node)
+        if v is None:
+            return "derived"
+        if v.is_given:
+            return "given"
+        if sadece_birim_mi(v):
+            # Kaynağı da birim dönüşümüyse zincir boyunca izle: asıl
+            # değer verilmişse bu da "verilmiş" sayılır.
+            gorulen = set()
+            cur = v
+            while cur is not None and sadece_birim_mi(cur):
+                if cur.name in gorulen:
+                    break
+                gorulen.add(cur.name)
+                if not cur.inputs:
+                    break
+                cur = self.values.get(cur.inputs[0])
+            if cur is not None and cur.is_given:
+                return "given"
+            return "unit"
+        return "derived"
 
     def given_nodes(self) -> list[str]:
         return sorted(n for n, v in self.values.items() if v.is_given)
@@ -771,6 +907,13 @@ def from_config(cfg) -> dict[str, float]:
     # pupil_diameter_mm = 0 "verilmedi" demek (config.py'deki konvansiyon).
     if cfg.lens.pupil_diameter_mm > 0:
         g["lens_pupil_mm"] = cfg.lens.pupil_diameter_mm
+    # Üreticinin kullanılabilir FOV'u ve görüntü dairesi — ikisi de
+    # DATASHEET girdisi. Aktarılmazsa arayüz bunları başka yoldan
+    # hesaplayıp "türetildi" rozeti basar; oysa kullanıcı bunları girmiştir.
+    if getattr(cfg.lens, "useful_fov_deg", 0.0) > 0:
+        g["lens_useful_fov_deg"] = cfg.lens.useful_fov_deg
+    if getattr(cfg.lens, "image_circle_mm", 0.0) > 0:
+        g["lens_image_circle_mm"] = cfg.lens.image_circle_mm
     # angular_res_deg = 0 "pasif panel" demek — açısal kaynak değilse
     # ekran zinciri hiç kurulmaz.
     if getattr(cfg.oled, "angular_res_deg", 0.0) > 0:
@@ -793,6 +936,41 @@ def solve_config(cfg, **kw) -> SolveResult:
     """
     kw.setdefault("model", getattr(cfg.lens, "projection", "rectilinear"))
     return solve(from_config(cfg), **kw)
+
+
+def eksikler_icin(hedef: str, given: Iterable[str],
+                  model: str = "rectilinear") -> list[tuple[str, ...]]:
+    """
+    `hedef`i çözebilmek için HANGİ girdilerin eksik olduğunu söyler.
+
+    Dönen: her biri "şunları da girersen çözülür" anlamına gelen düğüm
+    demetleri, EN AZ eksik olan önce. Boş liste = hedefi üreten hiçbir
+    kural yok (o büyüklük bu modelde türetilemez).
+
+    Neden gerekli: kullanıcı bir alanı boş bırakıp "hesapla" dediğinde
+    "yeterli bilgi yok" demek yetmiyor — NE girmesi gerektiğini de
+    söylemek gerekiyor. Aksi hâlde kullanıcı hangi alanı dolduracağını
+    tahmin etmek zorunda kalır.
+
+    Yalnızca TEK ADIM bakar: hedefi doğrudan üreten kuralların girdileri.
+    O girdilerin kendileri de türetilebilir olabilir; bu yüzden önce
+    mevcut bilinenlerle bir çözüm koşulur ve türetilmiş olanlar da
+    "elde var" sayılır.
+    """
+    rules = rules_for(model)
+    # Eldekilerden türetilebilen her şey zaten "var" sayılmalı.
+    elde = set(solve({g: 1.0 for g in given}, model=model).values)
+    elde |= set(given)
+
+    oneriler: list[tuple[str, ...]] = []
+    for r in rules:
+        if r.output != hedef:
+            continue
+        eksik = tuple(i for i in r.inputs if i not in elde)
+        if eksik and eksik not in oneriler:
+            oneriler.append(eksik)
+    oneriler.sort(key=len)
+    return oneriler
 
 
 def report(res: SolveResult, nodes: Iterable[str] | None = None) -> str:

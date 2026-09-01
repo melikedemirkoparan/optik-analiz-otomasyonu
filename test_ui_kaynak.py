@@ -25,6 +25,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt5.QtWidgets import QApplication
 
 from core import config as cfgmod, projection as projmod, solver
+from core.config import default_config
 from core.optics import compute_fov
 from core.pipeline import AnalysisResult
 from gui.main_window import MainWindow
@@ -76,8 +77,11 @@ kontrol("FOV 'türetildi' rozeti taşıyor",
         w.r_fov_xy.source() == "türetildi", w.r_fov_xy.source())
 kontrol("IFOV 'türetildi' rozeti taşıyor",
         w.r_ifov.source() == "türetildi", w.r_ifov.source())
-kontrol("Açısal çözünürlük 'türetildi' rozeti taşıyor",
-        w.r_ang_res.source() == "türetildi", w.r_ang_res.source())
+# Açısal çözünürlük IFOV'un derece cinsinden yazılışıdır — yeni bir hesap
+# değil, aynı sayının başka birimi. "türetildi" demek kullanıcıya burada
+# bir bağıntı uygulandığı izlenimi verirdi; rozet "birim" olmalı.
+kontrol("Açısal çözünürlük 'birim' rozeti taşıyor (türetildi DEĞİL)",
+        w.r_ang_res.source() == "birim", w.r_ang_res.source())
 kontrol("Sensör ölçüsü 'türetildi' rozeti taşıyor",
         w.r_sensor.source() == "türetildi", w.r_sensor.source())
 kontrol("Projeksiyon 'datasheet' (kullanıcı seçimi) rozeti taşıyor",
@@ -168,10 +172,58 @@ src = w._solver_sources()
 esleme = [(w.r_fov_xy, "fov_x_deg"), (w.r_fov_d, "fov_diag_deg"),
           (w.r_ifov, "ifov_x_urad"), (w.r_ifov_as, "ifov_x_arcsec"),
           (w.r_ang_res, "ifov_x_deg"), (w.r_sensor, "det_w_mm")]
+ROZET_METNI = {"given": "datasheet", "unit": "birim", "derived": "türetildi"}
 for row, node in esleme:
-    beklenen = {"given": "datasheet", "derived": "türetildi"}[src[node][0]]
+    beklenen = ROZET_METNI[src[node][0]]
     kontrol(f"panel ↔ çözücü: {node}", row.source() == beklenen,
             f"panel '{row.source()}' vs çözücü '{beklenen}'")
+
+
+# ---------------------------------------------------------------------------
+print("\n[3b] BİRİM ÇEVRİMİ 'türetildi' sayılmıyor")
+# 78.57 µrad/px ile 16.207 ″/px aynı ölçümdür; ikincisine "türetildi" demek
+# kullanıcıya hesap yapılmış izlenimi verir. Birim çevrimleri ayrı sınıf.
+r_birim = solver.solve({"lens_f_mm": 70.0, "det_pitch_um": 5.5,
+                        "det_w_px": 2048})
+kontrol("IFOV µrad gerçekten türetilmiş",
+        r_birim.kaynak_turu("ifov_x_urad") == "derived",
+        "f ve pitch'ten hesaplanıyor")
+for n in ("ifov_x_deg", "ifov_x_arcsec"):
+    kontrol(f"{n} birim çevrimi sayılıyor",
+            r_birim.kaynak_turu(n) == "unit",
+            f"kaynak_turu = {r_birim.kaynak_turu(n)}")
+kontrol("FOV birim çevrimi DEĞİL",
+        r_birim.kaynak_turu("fov_x_deg") == "derived")
+# Asıl değer VERİLMİŞSE birim çevrimi de "verilmiş" sayılmalı: kullanıcı
+# 78.57 µrad girdiyse, onun arcsec karşılığı da onun girdisidir.
+r_gv = solver.solve({"ifov_x_urad": 78.57})
+kontrol("verilen değerin birim çevrimi de datasheet",
+        r_gv.kaynak_turu("ifov_x_arcsec") == "given",
+        f"kaynak_turu = {r_gv.kaynak_turu('ifov_x_arcsec')}")
+
+
+# ---------------------------------------------------------------------------
+print("\n[3c] Boş alan = bilinmiyor; çözücü onu doldurabiliyor")
+# Kullanıcının istediği akış: alanı sil, arkadaki matematik bulsun.
+kontrol("odak uzaklığı alanı boş bırakılabiliyor",
+        w.f_focal.minimum() == 0.0,
+        "alt sınır 0 — eskiden 1.0 idi ve alan silinemiyordu")
+kontrol("boş alan 'bilinmiyor' gösteriyor",
+        w.f_focal.specialValueText() != "",
+        repr(w.f_focal.specialValueText()))
+# Pupil ve f# biliniyorsa f türetilebilmeli (f = D x N).
+r_bos = solver.solve({"lens_pupil_mm": 34.0, "lens_fnum": 1.4})
+kontrol("boş f, pupil ve f#'ten türetiliyor",
+        abs(r_bos.get("lens_f_mm") - 47.6) < 0.01,
+        f"f = {r_bos.get('lens_f_mm'):.2f} mm")
+# Çözülemiyorsa NE gerektiği söylenmeli.
+oneriler = solver.eksikler_icin("lens_f_mm", ["det_pitch_um", "det_w_px"])
+kontrol("çözülemeyen için eksik girdi öneriliyor", len(oneriler) > 0,
+        f"{len(oneriler)} öneri: " + ", ".join(
+            "+".join(solver.label(x) for x in o) for o in oneriler[:3]))
+kontrol("öneriler en az eksikten başlıyor",
+        all(len(oneriler[i]) <= len(oneriler[i + 1])
+            for i in range(len(oneriler) - 1)))
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +332,320 @@ kontrol("kenar pikseli temizlendi", w.r_ifov_edge.value() == "—")
 
 
 print("\n" + "=" * 72)
+
+
+# ---------------------------------------------------------------------------
+print("\n[8] Açılış durumu = temizlenmiş durum")
+# Eskiden `_clear_results` yalnızca analiz BAŞLARKEN çağrılıyordu; programın
+# ilk açılışı ile "analiz yapıldı sonra temizlendi" hâli farklı görünüyordu
+# (satır etiketleri yeniden adlandırılmış, bazı satırlar görünür kalmış).
+def _durum(win):
+    d = {}
+    for ad in dir(win):
+        if not ad.startswith("r_"):
+            continue
+        row = getattr(win, ad)
+        if not hasattr(row, "_value"):
+            continue
+        d[ad] = (row._value.text(), row._label.text(),
+                 row.isVisible(), row.source())
+    d["_gb_tilt"] = win.gb_tilt.isVisible()
+    d["_details"] = win.details_box.isVisible()
+    return d
+
+w8 = MainWindow()
+w8.show()
+app.processEvents()
+acilis = _durum(w8)
+
+w8.f_system.setCurrentIndex(w8.f_system.findData("Hydra yıldız izleyici"))
+w8._apply_system_preset()
+
+
+class _Res:
+    pass
+
+
+_r = _Res()
+_r.fov = compute_fov(w8._config_from_fields())
+for _a in ("tilt", "match", "mirror", "pointing", "coverage", "roi",
+           "notes", "verdict", "tilt_deg"):
+    setattr(_r, _a, None)
+try:
+    w8._show_results(_r)
+except Exception:
+    pass          # sahte sonuç nesnesi; ilgilendiğimiz FOV bloğu çalıştı
+app.processEvents()
+w8._clear_results()
+# Açılışta sağ bar BOŞ DEĞİL: nominal değerler donanımdan anında
+# hesaplanır. Karşılaştırma "aynı girdiyle aynı ekran mı" sorusudur,
+# "boş mu" değil — bu yüzden donanımı da açılıştaki hâline döndürüp
+# canlı hesabı yeniden koşturuyoruz. (Yukarıda Hydra yüklendi; onunla
+# kıyaslamak farklı donanımın farklı sayı vermesini hata sanmak olurdu.)
+w8._analiz_sonucu_var = False
+w8._load_config_into_fields(default_config())
+app.processEvents()
+sonra = _durum(w8)
+
+farklar = [k for k in acilis if acilis[k] != sonra.get(k)]
+kontrol("açılış ile temizlenmiş durum aynı", not farklar,
+        "fark yok" if not farklar else f"ayrışan: {farklar[:4]}")
+kontrol("FOV satır etiketleri başlangıca döndü",
+        w8.r_fov_xy._label.text() == "Yatay × Dikey",
+        w8.r_fov_xy._label.text())
+kontrol("daire satırları temizlikte gizlendi",
+        not w8.r_fov_eff.isVisible() and not w8.r_fov_circle.isVisible())
+
+
+# ---------------------------------------------------------------------------
+print("\n[9] Önerilen her girdinin panelde bir ALANI var")
+# Sistem "Görüntü dairesi çapını girin" diyordu ama o alan panelde yoktu;
+# kullanıcı olmayan bir alanı aramaya gönderiliyordu.
+w9 = MainWindow()
+w9.f_system.setCurrentIndex(w9.f_system.findData("Hydra yıldız izleyici"))
+w9._apply_system_preset()
+kontrol("görüntü dairesi alanı panelde var", hasattr(w9, "f_circle"))
+kontrol("görüntü dairesi ALAN_DUGUM'da eşleşiyor",
+        w9.ALAN_DUGUM.get("f_circle") == "lens_image_circle_mm")
+
+girilebilir = set(w9.ALAN_DUGUM.values()) | {
+    "det_w_px", "det_h_px", "scr_w_px", "scr_h_px"}
+# Önerilen her düğümün karşılığında gerçekten bir alan olmalı.
+_g = w9._panel_bilinenleri()
+_tum_oneri = []
+for _hedef in w9.ALAN_DUGUM.values():
+    for _o in solver.eksikler_icin(_hedef, _g.keys()):
+        _tum_oneri.append((_hedef, _o))
+# Hedef, bilinenlerden ÇIKARILMIŞ olmalı — kullanıcı o alanı sildiğinde
+# olan budur. Çıkarmazsak çözücü "zaten biliniyor" der ve öneri üretmez.
+_g_eksik = {k: v for k, v in _g.items() if k != "lens_useful_fov_deg"}
+kontrol("üretici FOV, daire çapından türetilebiliyor",
+        "lens_image_circle_mm" in {x for o in solver.eksikler_icin(
+            "lens_useful_fov_deg", _g_eksik.keys()) for x in o},
+        "daire çapı girilirse çözülür")
+
+# Daire çapı girilince üretici FOV gerçekten çözülmeli.
+w9.f_circle.setValue(18.112)
+w9._bastan_bos_guncelle()
+w9.f_ufov.setValue(0)
+_r9 = solver.solve_for(w9._panel_bilinenleri(), ["lens_useful_fov_deg"])
+kontrol("daire çapından üretici FOV türetiliyor",
+        abs(_r9.get("lens_useful_fov_deg") - 21.5) < 0.01,
+        f"{_r9.get('lens_useful_fov_deg'):.4f}°")
+
+
+# ---------------------------------------------------------------------------
+print("\n[10] Hızlı hesap kutusu kaldırıldı")
+# Paneldeki ham donanımı taban alıyordu; ölçülen FOV/IFOV ile karışınca
+# tutarsız sonuç veriyordu. Tam tablo Çözücü sekmesinde zaten var.
+kontrol("r_calc satırı yok", not hasattr(w9, "r_calc"))
+kontrol("_hizli_hesapla metodu yok", not hasattr(w9, "_hizli_hesapla"))
+kontrol("Çözücü sekmesi duruyor", hasattr(w9, "tab_solver"))
+# "Boşları hesapla" butonu da kaldırıldı: canlı hesap aynı işi butona
+# basmadan yapıyordu, buton ikinci bir yol olarak kafa karıştırıyordu.
+kontrol("Boşları hesapla butonu yok", not hasattr(w9, "btn_coz_bos"))
+kontrol("_bos_alanlari_coz metodu yok",
+        not hasattr(w9, "_bos_alanlari_coz"))
+
+
+
+# ---------------------------------------------------------------------------
+print("\n[11] HER türetilebilir büyüklük GİRİLEBİLİR")
+# Çözücünün bildiği 31 büyüklükten yarısının girilecek yeri yoktu.
+# Sol panele 12 alan eklemek paneli boş kutularla doldurdu; o alanlar
+# Çözücü sekmesine taşındı. Kapsam denetimi aynı: her büyüklük bir yerden
+# girilebilmeli — panelden ya da sekmeden.
+w11 = MainWindow()
+_panelden = set(w11.ALAN_DUGUM.values()) | {
+    "det_w_px", "det_h_px", "scr_w_px", "scr_h_px"}
+_sekmeden = set(w11.tab_solver.fields)
+_girilebilir = _panelden | _sekmeden
+_eksik = set(solver.NODE_LABELS) - _girilebilir
+kontrol("her büyüklüğün girilebilir bir yeri var", not _eksik,
+        "eksik yok" if not _eksik
+        else ", ".join(sorted(solver.label(n) for n in _eksik)))
+kontrol("sol panel yalnızca DONANIMI tutuyor",
+        not any(a.startswith("f_n_") for a in w11.ALAN_DUGUM),
+        f"{len(w11.ALAN_DUGUM)} donanım alanı")
+kontrol("FOV/IFOV sekmeden giriliyor",
+        {"fov_x_deg", "ifov_x_urad"} <= _sekmeden)
+# ALAN_DUGUM örneğe kopyalanmalı; sınıf düzeyinde kalırsa birikirdi.
+_w11b = MainWindow()
+kontrol("ALAN_DUGUM pencereler arasında birikmiyor",
+        len(_w11b.ALAN_DUGUM) == len(w11.ALAN_DUGUM),
+        f"{len(w11.ALAN_DUGUM)} = {len(_w11b.ALAN_DUGUM)}")
+
+
+# ---------------------------------------------------------------------------
+print("\n[12] TERS yönler panelden çalışıyor")
+# Asıl kazanım bu: kullanıcı bildiğini girip bilmediğini sildiğinde
+# arkadaki matematik onu bulmalı. Her senaryo ayrı bir yön.
+_CMV = "CMV4000 + Rodenstock 70mm"
+_HYD = "Hydra yıldız izleyici"
+
+
+def _ters_dene(preset, girilen, silinen):
+    """`girilen` artık ÇÖZÜCÜ SEKMESİNE yazılır (düğüm adıyla)."""
+    win = MainWindow()
+    _i = win.f_system.findData(preset)
+    if _i >= 0:
+        win.f_system.setCurrentIndex(_i)
+        win._apply_system_preset()
+    for _dugum, _v in girilen.items():
+        win.tab_solver.fields[_dugum].setText(str(_v))
+    win._bastan_bos_guncelle()
+    getattr(win, silinen).setValue(0)
+    _bos = [d for d in win._bos_alanlar() if d not in win._bastan_bos]
+    _res = solver.solve_for(win._panel_bilinenleri(), _bos,
+                            model=win.f_proj.currentData())
+    return _res.get(win.ALAN_DUGUM[silinen])
+
+
+_v = _ters_dene(_CMV, {"fov_x_deg": 9.2}, "f_focal")
+kontrol("FOV girildi -> odak uzaklığı bulunuyor", abs(_v - 70.0) < 0.01,
+        f"f = {_v:.4f} mm")
+
+_v = _ters_dene(_CMV, {"ifov_x_urad": 78.5714}, "f_focal")
+kontrol("IFOV girildi -> odak uzaklığı bulunuyor", abs(_v - 70.0) < 0.05,
+        f"f = {_v:.4f} mm")
+
+_v = _ters_dene(_CMV, {"fov_x_deg": 9.2}, "f_pitch_x")
+kontrol("FOV girildi -> piksel pitch bulunuyor", abs(_v - 5.5) < 0.01,
+        f"pitch = {_v:.4f} µm")
+
+_v = _ters_dene(_HYD, {"scr_f_mm": 28.90}, "f_scr_ang")
+kontrol("ekran f'i girildi -> açısal çözünürlük bulunuyor",
+        abs(_v - 0.027) < 0.0005, f"°/px = {_v:.6f}")
+
+_v = _ters_dene(_HYD, {"det_diag_mm": 26.0673}, "f_pitch_x")
+kontrol("sensör köşegeni girildi -> pitch bulunuyor", abs(_v - 18.0) < 0.05,
+        f"pitch = {_v:.4f} µm")
+
+# Ölçek görüntüden ölçülür: lensi fiziksel olarak ölçmeden f bulunabilir.
+# Hydra'da pupil (34) × f# (1.4) = 47.6 da bir yol; çözücü hangisini
+# seçerse seçsin ikisi de datasheet'in 47.7'sine %0.25 içinde. Testi bu
+# yolu ZORLAYACAK şekilde kurmak için pupil'i de boşaltıyoruz — yoksa
+# ölçek yolunun çalıştığını değil, pupil yolunun çalıştığını ölçerdik.
+_win12 = MainWindow()
+_win12.f_system.setCurrentIndex(_win12.f_system.findData(_HYD))
+_win12._apply_system_preset()
+_win12.tab_solver.fields["scr_f_mm"].setText("28.90")
+_win12.tab_solver.fields["scale_expected"].setText(
+    str((47.7 / 0.018) / (28.90 / 0.01362)))
+_win12._bastan_bos_guncelle()
+_win12.f_focal.setValue(0)
+_win12.f_pupil.setValue(0)       # pupil yolunu kapat
+_r12 = solver.solve_for(_win12._panel_bilinenleri(), ["lens_f_mm"])
+_v = _r12.get("lens_f_mm")
+kontrol("ölçek girildi -> lens f'i görüntüden bulunuyor",
+        abs(_v - 47.7) < 0.05, f"f = {_v:.4f} mm")
+kontrol("bu yol gerçekten ölçek üzerinden gitti",
+        "ölçek" in _r12.values["lens_f_mm"].rule.lower(),
+        _r12.values["lens_f_mm"].rule)
+
+
+# ---------------------------------------------------------------------------
+print("\n[13] Girilen değer 'datasheet', türetilen 'türetildi'")
+# Kullanıcının GİRDİĞİ bir FOV, sonuç panelinde "türetildi" görünmemeli.
+w13 = MainWindow()
+w13.f_system.setCurrentIndex(w13.f_system.findData(_CMV))
+w13._apply_system_preset()
+kontrol("FOV girilmemişken türetilmiş sayılıyor",
+        w13._solver_sources().get("fov_x_deg", ("?",))[0] == "derived")
+w13.tab_solver.fields["fov_x_deg"].setText("9.2")
+kontrol("FOV girilince 'given' oluyor",
+        w13._solver_sources().get("fov_x_deg", ("?",))[0] == "given",
+        w13._solver_sources().get("fov_x_deg", ("yok",))[0])
+
+# Preset değişince ölçülen değerler taşınmamalı: eski sistemin FOV'u yeni
+# sistemin panelinde kalırsa çözücü onu bilinen sayar ve çelişki üretir.
+w13.f_system.setCurrentIndex(w13.f_system.findData(_HYD))
+w13._apply_system_preset()
+# Sekme preset'ten bağımsızdır: kullanıcının oraya yazdığı değer
+# donanım değişince silinmez, çünkü sekme geçici bir çalışma alanıdır.
+kontrol("sekmedeki değer preset değişince duruyor",
+        w13.tab_solver.fields["fov_x_deg"].text() == "9.2",
+        w13.tab_solver.fields["fov_x_deg"].text())
+
+
+
+# ---------------------------------------------------------------------------
+print("\n[14] CANLI HESAP — sağ bar sol panelden anında dolar")
+# FOV/IFOV görüntü gerektirmez, donanımdan çıkar. Buna rağmen sağ bar
+# analiz koşulana kadar boş duruyordu ve hesaplatmak için ayrıca butona
+# basmak gerekiyordu. Artık sol panelde ne varsa sağ barda karşılığı yazar.
+w14 = MainWindow()
+kontrol("açılışta FOV zaten hesaplanmış",
+        w14.r_fov_xy._value.text().startswith("9.200"),
+        w14.r_fov_xy._value.text())
+kontrol("açılışta IFOV zaten hesaplanmış",
+        w14.r_ifov._value.text().startswith("78.57"),
+        w14.r_ifov._value.text())
+kontrol("açılışta sensör ölçüsü yazılı",
+        "11.26" in w14.r_sensor._value.text(), w14.r_sensor._value.text())
+
+# Bir alan değişince ANINDA güncellenmeli — butona basılmadan.
+w14.f_focal.setValue(50.0)
+kontrol("f değişince FOV anında güncelleniyor",
+        w14.r_fov_xy._value.text().startswith("12.85"),
+        f"f=50mm -> {w14.r_fov_xy._value.text()}")
+w14.f_pitch_x.setValue(11.0)
+kontrol("pitch değişince IFOV anında güncelleniyor",
+        w14.r_ifov._value.text().startswith("220"),
+        w14.r_ifov._value.text())
+
+# ÖLÇÜME dayanan satırlar "ölçülemedi" DEMEMELİ: analiz denenmedi ki
+# başarısız olsun. Bu, kullanıcıyı olmayan bir sorunu aramaya gönderirdi.
+w14b = MainWindow()
+for _ad in ("r_tilt", "r_decenter", "r_mirror", "r_inliers"):
+    _row = getattr(w14b, _ad)
+    kontrol(f"{_ad}: 'ölçülemedi' değil, boş",
+            _row._value.text() == "—", _row._value.text())
+kontrol("durum satırı ne yapılacağını söylüyor",
+        "ANALİZ ET" in w14b.lbl_verdict.text(),
+        w14b.lbl_verdict.text()[:60])
+
+# Boş alan varsa sağ bar YİNE hesaplamalı: değer türetilebiliyorsa
+# kullanıcının onu panele yazmasını beklemeye gerek yok.
+w14c = MainWindow()
+w14c.tab_solver.fields["fov_x_deg"].setText("9.2")
+w14c.f_focal.setValue(0)          # f'i sil — FOV'dan türetilebilir
+kontrol("f boşken FOV yine hesaplanıyor",
+        w14c.r_fov_xy._value.text().startswith("9.200"),
+        w14c.r_fov_xy._value.text())
+kontrol("f alanı boş KALIYOR (panele yazılmıyor)",
+        w14c.f_focal.value() == 0.0,
+        "boş alan kullanıcının 'bilmiyorum' demesidir")
+
+# Hydra: f silinse bile pupil × f# üzerinden çıkar.
+w14d = MainWindow()
+w14d.f_system.setCurrentIndex(w14d.f_system.findData("Hydra yıldız izleyici"))
+w14d._apply_system_preset()
+w14d.f_focal.setValue(0)
+kontrol("f boşken pupil×f# yolundan FOV çıkıyor",
+        w14d.r_fov_xy._value.text().startswith("21.9"),
+        w14d.r_fov_xy._value.text())
+
+# Hiçbir yol yoksa "nan" DEĞİL, dürüst bir açıklama görünmeli.
+w14e = MainWindow()
+w14e.f_focal.setValue(0)
+kontrol("çözülemeyince 'nan' gösterilmiyor",
+        "nan" not in w14e.r_fov_xy._value.text().lower(),
+        w14e.r_fov_xy._value.text())
+kontrol("çözülemeyince neden açıklanıyor",
+        "yeterli bilgi yok" in w14e.lbl_verdict.text(),
+        w14e.lbl_verdict.text()[:50])
+
+# Analiz koşulduktan sonra canlı hesap ÖLÇÜMÜN üzerine yazmamalı.
+w14f = MainWindow()
+w14f._analiz_sonucu_var = True
+_onceki = w14f.r_fov_xy._value.text()
+w14f.f_focal.setValue(33.0)
+kontrol("analizden sonra canlı hesap ölçümü ezmiyor",
+        w14f.r_fov_xy._value.text() == _onceki,
+        f"'{_onceki}' korundu")
+
+
 print(f"SONUÇ: {GECTI} geçti, {KALDI} kaldı")
 print("=" * 72)
 sys.exit(1 if KALDI else 0)
