@@ -29,6 +29,7 @@ from core.config import default_config
 from core.optics import compute_fov
 from core.pipeline import AnalysisResult
 from gui.main_window import MainWindow
+from gui.widgets import ResultRow
 
 GECTI = 0
 KALDI = 0
@@ -347,7 +348,10 @@ def _durum(win):
         row = getattr(win, ad)
         if not hasattr(row, "_value"):
             continue
-        d[ad] = (row._value.text(), row._label.text(),
+        # `_label.text()` kısaltılmış olabilir ("Yatay × Di…") ve kısaltma
+        # kutu genişliğine bağlıdır; karşılaştırma TAM etiket üzerinden
+        # yapılmalı, yoksa yerleşim farkı içerik farkı gibi görünür.
+        d[ad] = (row._value.text(), row._label_tam,
                  row.isVisible(), row.source())
     d["_gb_tilt"] = win.gb_tilt.isVisible()
     d["_details"] = win.details_box.isVisible()
@@ -391,8 +395,8 @@ farklar = [k for k in acilis if acilis[k] != sonra.get(k)]
 kontrol("açılış ile temizlenmiş durum aynı", not farklar,
         "fark yok" if not farklar else f"ayrışan: {farklar[:4]}")
 kontrol("FOV satır etiketleri başlangıca döndü",
-        w8.r_fov_xy._label.text() == "Yatay × Dikey",
-        w8.r_fov_xy._label.text())
+        w8.r_fov_xy._label_tam == "Yatay × Dikey",
+        w8.r_fov_xy._label_tam)
 kontrol("daire satırları temizlikte gizlendi",
         not w8.r_fov_eff.isVisible() and not w8.r_fov_circle.isVisible())
 
@@ -645,6 +649,63 @@ kontrol("analizden sonra canlı hesap ölçümü ezmiyor",
         w14f.r_fov_xy._value.text() == _onceki,
         f"'{_onceki}' korundu")
 
+
+
+# ---------------------------------------------------------------------------
+print("\n[15] Sonuç satırı: ne etiket ne değer kırpılır")
+# Bu yerleşim iki kez yanlış kuruldu ve ikisi de aynı tehlikeyi üretti:
+# yarım okunan bir sayı sessizce yanlış karara götürür.
+#   1. Etiket stretch alınca değer kırpıldı ("0 × 9.200").
+#   2. Etikete Ignored verilince etiket yok oldu, değer soldan kesildi.
+w15 = MainWindow()
+w15.resize(1720, 950)
+w15.show()
+app.processEvents()
+
+kontrol("değer satır sarabiliyor", w15.r_fov_xy._value.wordWrap())
+kontrol("etiketin alt genişliği var",
+        w15.r_fov_xy._label.minimumWidth() >= 80,
+        f"{w15.r_fov_xy._label.minimumWidth()} px")
+kontrol("değerin alt genişliği var",
+        w15.r_fov_xy._value.minimumWidth() >= 96,
+        f"{w15.r_fov_xy._value.minimumWidth()} px")
+
+# Uzun bir değer verildiğinde metin OLDUĞU GİBİ saklanmalı; görünürde
+# sarılır ama içerik kısalmaz.
+_uzun = "546.677 / 652.620  (tüm ekran (desen yarıçapı bilinmiyor))"
+w15.r_cov_pattern.set_value(_uzun)
+app.processEvents()
+kontrol("uzun değer içeriği kısalmıyor",
+        w15.r_cov_pattern._value.text() == _uzun,
+        f"{len(_uzun)} karakter korundu")
+
+# Etiket kısalırsa tam metin ipucunda kalmalı — kullanıcı hangi satıra
+# baktığını yine anlayabilsin.
+w15.r_cov_pattern.set_label("Desenden kullanılan")
+app.processEvents()
+# Kendi açıklayıcı ipucu OLMAYAN bir satırda, kısaltma tam metni ipucuna
+# koymalı. Açıklayıcı ipucu olan satırlarda o ipucu korunur — kısaltma
+# bilgisi için satırın asıl açıklamasını feda etmek yanlış olurdu.
+_sade = ResultRow("Çok uzun bir satır etiketi örneği", "px")
+_sade.resize(90, 20)
+_sade.show()
+app.processEvents()
+_sade._etiketi_sigdir()
+kontrol("ipucusuz satırda kısaltma tam metni ipucuna koyuyor",
+        _sade._label.text() == _sade._label_tam
+        or _sade._label.toolTip() == _sade._label_tam,
+        f"'{_sade._label.text()}' → ipucu '{_sade._label.toolTip()[:28]}'")
+kontrol("açıklayıcı ipucu kısaltmayla ezilmiyor",
+        w15.r_cov_pattern._aciklama_ipucu
+        and "sensöre düşüyor" in w15.r_cov_pattern._label.toolTip(),
+        w15.r_cov_pattern._label.toolTip()[:44] + "…")
+kontrol("set_label tam metni saklıyor",
+        w15.r_cov_pattern._label_tam == "Desenden kullanılan")
+
+# Sağ panel, en uzun satırı taşımaya yetecek kadar geniş açılmalı.
+kontrol("sağ panel yeterince geniş açılıyor",
+        w15.centralWidget().findChild(type(w15.tabs)) is not None and
+        w15.width() > 0)
 
 print(f"SONUÇ: {GECTI} geçti, {KALDI} kaldı")
 print("=" * 72)

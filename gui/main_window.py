@@ -225,7 +225,10 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
-        splitter.setSizes([380, 720, 360])
+        # Sağ panel 360 px'ken uzun kapsama değerleri ("546.677 / 652.620
+        # (tüm ekran…)") satır sarmasına giriyor ve kısa değerler bile
+        # ikiye bölünüyordu. 440 px, en uzun satırı tek satırda tutar.
+        splitter.setSizes([380, 660, 440])
         root.addWidget(splitter, 1)
 
         # Alt: ilerleme + durum
@@ -1009,7 +1012,7 @@ class MainWindow(QMainWindow):
 
         lay.addStretch(1)
         scroll.setWidget(inner)
-        scroll.setMinimumWidth(320)
+        scroll.setMinimumWidth(380)
         return scroll
 
     # --------------------------- yardımcılar -------------------------------
@@ -2061,9 +2064,9 @@ class MainWindow(QMainWindow):
         # Bunlar geri alınmazsa açılıştaki sağ bar ile analizden sonraki
         # sağ bar farklı görünür — aynı boş tabloyu iki ayrı biçimde
         # gösterir. Temizlik, değeri değil DURUMU da kapsamalı.
-        self.r_fov_xy._label.setText("Yatay × Dikey")
-        self.r_fov_d._label.setText("Köşegen")
-        self.r_ifov_edge._label.setText("Kenar pikseli")
+        self.r_fov_xy.set_label("Yatay × Dikey")
+        self.r_fov_d.set_label("Köşegen")
+        self.r_ifov_edge.set_label("Kenar pikseli")
         for r in (self.r_fov_eff, self.r_fov_circle, self.r_fov_fill,
                   self.r_fov_model, self.r_cov_maxang):
             r.setVisible(False)
@@ -2230,8 +2233,8 @@ class MainWindow(QMainWindow):
                 self.r_fov_xy.set_value(
                     f"{f.fov_x_deg:.3f} × {f.fov_y_deg:.3f}", MUTED)
                 self.r_fov_d.set_value(f"{f.fov_diag_deg:.3f}", MUTED)
-                self.r_fov_xy._label.setText("Geometrik Y × D")
-                self.r_fov_d._label.setText("Geometrik köşegen")
+                self.r_fov_xy.set_label("Geometrik Y × D")
+                self.r_fov_d.set_label("Geometrik köşegen")
                 # Rozet açıklamalarını da ara-veri diline çevir; aksi hâlde
                 # bu satırlar hâlâ "FOV" gibi okunur.
                 _geo_not = (
@@ -2254,8 +2257,8 @@ class MainWindow(QMainWindow):
                 self.r_fov_eff.setVisible(False)
                 self.r_fov_circle.setVisible(False)
                 self.r_fov_fill.setVisible(False)
-                self.r_fov_xy._label.setText("Yatay × Dikey")
-                self.r_fov_d._label.setText("Köşegen")
+                self.r_fov_xy.set_label("Yatay × Dikey")
+                self.r_fov_d.set_label("Köşegen")
 
             # Projeksiyon modeli — sonucun ayrılmaz parçası.
             model = getattr(f, "projection", projmod.RECTILINEAR)
@@ -2328,7 +2331,7 @@ class MainWindow(QMainWindow):
                     f"{kenar:.2f}  ({sapma:+.2f}%)",
                     GOOD if abs(sapma) < 1.0 else WARN)
                 if daire_kisitli:
-                    self.r_ifov_edge._label.setText("Görüntü kenarı")
+                    self.r_ifov_edge.set_label("Görüntü kenarı")
                     ek = ("\n\nBU SAYI DAİRENİN KENARINDAN okunur, sensörün "
                           f"kenarından değil: aydınlık alan {f.eff_fov_x_deg / 2:.3f}° "
                           "yarı-açıda biter.\n"
@@ -2336,7 +2339,7 @@ class MainWindow(QMainWindow):
                           f"{f.ifov_edge_x_urad:.2f} µrad verirdi ama orası "
                           "karanlıktır.")
                 else:
-                    self.r_ifov_edge._label.setText("Kenar pikseli")
+                    self.r_ifov_edge.set_label("Kenar pikseli")
                     ek = ""
                 self.r_ifov_edge.set_source(
                     "derived",

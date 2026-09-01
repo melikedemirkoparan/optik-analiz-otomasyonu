@@ -289,6 +289,10 @@ class ResultRow(QWidget):
         lay.setContentsMargins(2, 3, 2, 3)
 
         self._label = QLabel(label)
+        # Kısaltma için tam metni sakla — `_etiketi_sigdir` bunu kullanır.
+        self._label_tam = label
+        # Kurucudan gelen açıklayıcı ipucu var mı? Varsa kısaltma onu ezmez.
+        self._aciklama_ipucu = bool(tooltip)
         self._label.setStyleSheet(f"color:{MUTED};")
         if tooltip:
             self._label.setToolTip(tooltip)
@@ -320,13 +324,59 @@ class ResultRow(QWidget):
         # sayının yerini yiyip "0 × 9.200" ya da yalnızca "(-0.64%)" gibi
         # yarım değerler görünüyordu — sonuç panelinde en kritik hata bu,
         # çünkü yanlış okunan sayı sessizce yanlış karara götürür.
+        # Yerleşim kuralı: ETİKET DE DEĞER DE KIRPILMAZ.
+        #
+        # Bu satır iki kez yanlış kuruldu ve ikisi de sonuç panelinde en
+        # tehlikeli hatayı üretti — yarım okunan bir sayı sessizce yanlış
+        # karara götürür:
+        #   1. Etiket tek başına stretch alınca değer kırpıldı
+        #      ("0 × 9.200", yalnızca "(-0.64%)").
+        #   2. Etikete `Ignored` verilince bu kez etiket yok oldu
+        #      ("Desende…"), değer yine soldan kesildi.
+        #
+        # Çözüm ikisini de sıkıştırmaya çalışmamak: değer uzunsa satır
+        # SARILIR ve iki satıra yayılır. Panel dar da olsa hiçbir şey
+        # kaybolmaz.
         self._label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self._value.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
-        self._value.setMinimumWidth(96)
-        lay.addWidget(self._label, 1)
+        self._label.setMinimumWidth(92)
+        self._value.setWordWrap(True)
+        self._value.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        self._value.setMinimumWidth(104)
+        lay.addWidget(self._label, 2)
         lay.addWidget(self._badge, 0)
-        lay.addWidget(self._value, 0)
+        lay.addWidget(self._value, 3)
         lay.addWidget(self._unit, 0)
+
+    def set_label(self, text: str):
+        """Satır etiketini değiştirir (kısaltma mantığını bozmadan)."""
+        self._label_tam = text
+        self._etiketi_sigdir()
+
+    def _etiketi_sigdir(self):
+        """
+        Etiketi kutuya sığdırır; taşarsa sonunu "…" ile keser ve tam
+        metni ipucuna koyar. Kesilen etiket okunabilir kalmalı — yoksa
+        kullanıcı hangi satıra baktığını bilemez.
+        """
+        tam = getattr(self, "_label_tam", None)
+        if tam is None:
+            return
+        fm = self._label.fontMetrics()
+        w = max(self._label.width(), self._label.minimumWidth())
+        self._label.setText(fm.elidedText(tam, Qt.ElideRight, w))
+        if self._label.text() != tam:
+            # Etiket kısaldıysa tam metin ipucunda görünmeli — kullanıcı
+            # hangi satıra baktığını anlayabilsin. Satırın kendi açıklayıcı
+            # ipucu varsa (kurucuya verilen `tooltip`) o korunur; yalnızca
+            # kısaltmadan doğan boşluk doldurulur.
+            if not self._aciklama_ipucu:
+                self._label.setToolTip(tam)
+        elif not self._aciklama_ipucu:
+            self._label.setToolTip("")
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._etiketi_sigdir()
 
     def set_value(self, text: str, color: str = ACCENT):
         self._value.setText(text)

@@ -19,6 +19,12 @@ yeterlidir.
 
 ![Arayüz — analiz sonrası](docs/gorseller/arayuz_sonuc.png)
 
+Sağ paneldeki değerler iki ayrı kaynaktan gelir ve rozetleriyle ayrılır:
+**nominal** olanlar (FOV, IFOV, sensör ölçüsü) donanım parametrelerinden
+görüntüye bakmadan hesaplanır ve panel açılır açılmaz doludur; **ölçülen**
+olanlar (roll, tilt, decenter, kapsama) yalnızca iki görüntü karşılaştırılınca
+doğar. Analiz koşulduğunda ölçüm nominalin yerini alır.
+
 ## Kurulum
 
 Python 3.12 ve şu paketler:
@@ -107,6 +113,25 @@ türetilebiliyorsa verilen kalır; türetilen yalnızca tutarlılık denetiminde
 kullanılır ve ayrışma `Conflict` olarak raporlanır. Tolerans %1'dir çünkü
 datasheet değerleri yuvarlıdır (Hydra'da 34.0 × 1.4 = 47.6 ≠ 47.7); bu
 üretici yuvarlamasını yutar, gerçek parametre hatasını yutmaz.
+
+#### Arayüzde: Çözücü sekmesi
+
+Çözücü orta paneldeki **Çözücü** sekmesinden kullanılır. Bildiğiniz değerleri
+girer, bilmediklerinizi boş bırakırsınız; tablo her sonucun değerini, birimini
+ve hangi kuraldan geldiğini yazar. Çözülemeyen bir büyüklük varsa hangi girdinin
+eksik olduğu söylenir.
+
+![Çözücü sekmesi — f boş, FOV girilmiş](docs/gorseller/arayuz_cozucu.png)
+
+Yukarıda odak uzaklığı boş bırakılmış, FOV = 9.2° girilmiştir; çözücü
+`f = 69.9992 mm` değerini FOV ve sensör boyutundan türetmiş, sağ bardaki
+nominal FOV/IFOV de bu türetilen f üzerinden hesaplanmıştır. Sekmeye girilen
+değerler sağ barı besler — aynı büyüklük hem sol panelde hem sekmede doluysa
+sol paneldeki kazanır.
+
+Sol paneldeki bir alan **silinip boş bırakılabilir**; boş alan "bilinmiyor"
+demektir ve çözücü onu arka planda türetmeye çalışır. Türetebiliyorsa sağ bar
+yine dolar, alan boş kalmaya devam eder.
 
 ### Tilt, roll ve decenter
 
@@ -229,10 +254,10 @@ Sarı/kırmızı durumda üç kontrol:
 ```bash
 python3 test_core.py             # Çekirdek FOV/IFOV matematiği
 python3 test_projection.py       # Projeksiyon modelleri (86 kontrol)
-python3 test_solver.py           # İlişki çözücü (123 kontrol)
+python3 test_solver.py           # İlişki çözücü (127 kontrol)
 python3 test_pointing.py         # Decenter/roll/tilt + kapsama
 python3 test_goruntu_dairesi.py  # Görüntü dairesi kısıtı (75 kontrol)
-python3 test_ui_kaynak.py        # Panel kaynak rozetleri (52 kontrol)
+python3 test_ui_kaynak.py        # Panel kaynak rozetleri + çözücü arayüzü (112 kontrol)
 python3 test_tilt_synth.py       # Sentetik doğrulama (görüntü gerekmez)
 python3 test_tilt_multi.py       # Ölçüm katmanı: doğruluk + dürüstlük
 python3 test_dense_align.py      # Yoğun hizalama
@@ -373,6 +398,7 @@ optik_analiz/
 │   └── pipeline.py        Tüm akışı birleştiren giriş noktası
 ├── gui/
 │   ├── main_window.py     Ana pencere (3 panel, sekmeler, ROI, arka plan thread)
+│   ├── solver_tab.py      Çözücü sekmesi: bilinenleri gir, bilinmeyeni bul
 │   └── widgets.py         Tema, görüntü göstericisi, sonuç satırları
 ├── docs/                  Kullanım kılavuzu (md/html/pdf) + görseller
 ├── patterns/              Üretilmiş test deseni varyantları
