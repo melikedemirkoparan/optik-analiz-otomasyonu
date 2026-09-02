@@ -1663,21 +1663,22 @@ class MainWindow(QMainWindow):
         out: dict[str, float] = {}
         if not getattr(self, "_analiz_sonucu_var", False):
             return out
-        f = getattr(self._son_res, "fov", None) if self._son_res else None
-        if f is None:
-            return out
-        for dugum, oz in (("fov_x_deg", "fov_x_deg"),
-                          ("fov_y_deg", "fov_y_deg"),
-                          ("fov_diag_deg", "fov_diag_deg"),
-                          ("ifov_x_urad", "ifov_x_urad"),
-                          ("ifov_y_urad", "ifov_y_urad")):
-            d = getattr(f, oz, None)
-            try:
-                d = float(d)
-            except (TypeError, ValueError):
-                continue
-            if math.isfinite(d) and d > 0:
-                out[dugum] = d
+
+        # FOV/IFOV BURAYA GİRMEZ.
+        #
+        # `res.fov` analiz sonrası da `compute_fov(cfg)` çıktısıdır — yani
+        # f ve pitch'ten TÜRETİLMİŞ nominal değer, ölçüm değil. Bunları
+        # "ölçüldü" diye çözücüye girdi olarak vermek iki hata yapar:
+        #   1. Sekmede FOV "girdi" görünür; kullanıcı alanı silse bile
+        #      geri yazılır ve "boş bırak, hesaplasın" akışı bozulur.
+        #   2. Çözücü onları dokunulmaz sayar; oysa f'ten türetilmişlerdir
+        #      ve f değişince değişmeleri gerekir.
+        #
+        # Analizin GERÇEKTEN ölçtüğü optik büyüklük tektir: ölçek.
+        # Ondan türetilen f ve FOV `lens_f_measured_mm` /
+        # `fov_measured_x_deg` düğümlerine düşer — nominal olanlarla
+        # karışmadan, ayrı satırlarda.
+
         # Hizalamanın ölçtüğü ölçek — `scale_expected` DEĞİL. Beklenen ölçek
         # donanımdan türetilir; bu görüntüden gelir ve ikisinin farkı asıl
         # bilgidir. Aynı düğüme yazılsalardı çözücü kendi türettiğini ölçüm

@@ -1024,11 +1024,72 @@ if _fov_satir is not None:
             "kullanıcının aradığı sayı öne çıkıyor")
     kontrol("değer doğru", _deger.text().startswith("9.19"), _deger.text())
 
-# Analiz koşulduğunda ölçümler AKMALI — ayrım ölçümü engellememeli.
+# Analiz koşulduğunda GERÇEK ölçüm akmalı — ama FOV/IFOV değil.
+# `res.fov` analiz sonrası da compute_fov(cfg) çıktısıdır: f ve pitch'ten
+# TÜRETİLMİŞ nominal değer. Onu "ölçüldü" diye çözücüye girdi vermek,
+# kullanıcı alanı silse bile geri yazılmasına yol açar.
 w20._analiz_sonucu_var = True
-kontrol("analiz sonrası ölçümler akıyor",
-        "fov_x_deg" in w20._olculen_dugumler(),
-        "ölçüm varsa aktarılıyor")
+_olc = w20._olculen_dugumler()
+kontrol("FOV analiz sonrası da ÖLÇÜM sayılmıyor",
+        "fov_x_deg" not in _olc,
+        "res.fov = compute_fov(cfg) — nominal, ölçüm değil")
+kontrol("IFOV de ölçüm sayılmıyor", "ifov_x_urad" not in _olc)
+
+
+# ---------------------------------------------------------------------------
+print("\n[21] Analizin GERÇEKTEN ölçtüğü tek optik büyüklük: ölçek")
+# Ölçek homografiden gelir. Ondan türetilen f ve FOV ayrı düğümlere
+# düşer (`lens_f_measured_mm`, `fov_measured_x_deg`) — nominal olanlarla
+# karışmadan, ayrı satırlarda.
+class _P21:
+    measured_scale = 2.1128
+    screen_implied_focal_mm = 28.9025
+
+
+class _R21:
+    pointing = _P21()
+    fov = None
+
+
+w21 = MainWindow()
+w21.f_system.setCurrentIndex(w21.f_system.findData("CMV4000 + Rodenstock 70mm"))
+w21._apply_system_preset()
+# Ölçekten f çıkarmak için ekranın AÇISAL ölçeği gerekir; pasif panelde
+# (°/px = 0) denklem iki bilinmeyenli kalır ve f çözülmez — bu doğru
+# davranış, o yüzden test açısal kaynaklı ekranla kurulur.
+_i21 = w21.f_scr_sel.findData("STOS (1280×1024, 13.62µm, 0.027°/px)")
+w21.f_scr_sel.setCurrentIndex(_i21)
+w21._apply_screen_preset()
+w21._son_res = _R21()
+w21._analiz_sonucu_var = True
+_olc21 = w21._olculen_dugumler()
+kontrol("ölçek ÖLÇÜM olarak aktarılıyor",
+        _olc21.get("scale_measured") == 2.1128, str(_olc21))
+kontrol("ölçümden gelen TEK büyüklük ölçek",
+        set(_olc21) == {"scale_measured"}, str(set(_olc21)))
+
+# Sekmeye aktarıldığında FOV boş kalmalı, ölçek dolu.
+w21.tab_solver.btn_panelden.click()
+kontrol("sekmede FOV boş (türetilecek)",
+        w21.tab_solver.fields["fov_x_deg"].text() == "")
+kontrol("sekmede ölçülen ölçek dolu",
+        w21.tab_solver.fields["scale_measured"].text() != "",
+        w21.tab_solver.fields["scale_measured"].text())
+
+# Çöz: FOV türetilmiş, ölçülen f de ölçekten çıkmış olmalı.
+w21.tab_solver.coz()
+_r21 = solver.solve(w21.tab_solver.girdiler())
+kontrol("FOV çözücüde TÜRETİLMİŞ",
+        _r21.is_derived("fov_x_deg"),
+        _r21.values["fov_x_deg"].rule)
+kontrol("ölçülen f ölçekten çıkıyor",
+        _r21.is_derived("lens_f_measured_mm"),
+        f"{_r21.get('lens_f_measured_mm'):.4f} mm")
+kontrol("nominal ile ölçülen f AYRI düğüm",
+        abs(_r21.get("lens_f_mm") - 70.0) < 0.01
+        and abs(_r21.get("lens_f_measured_mm") - 70.0) > 1.0,
+        f"nominal {_r21.get('lens_f_mm'):.2f} vs ölçülen "
+        f"{_r21.get('lens_f_measured_mm'):.2f} mm")
 
 print(f"SONUÇ: {GECTI} geçti, {KALDI} kaldı")
 print("=" * 72)
