@@ -548,8 +548,16 @@ def _build_rules(model: str = "rectilinear") -> list[Rule]:
     # f'i ondan çıkar. `scale_expected` düğümü ölçülen ölçekle beslenir.
     # Bu, panelin "Ölçülen f" satırının çözücüdeki karşılığıdır — aynı
     # bağıntının iki yerde ayrı yazılması ayrışma riski doğururdu.
+    # DİKKAT — girdi `scale_measured`, `scale_expected` DEĞİL.
+    #
+    # İkisi ayrı düğüm olmalı: `scale_expected` donanımdan TÜRETİLİR
+    # (f_lens'ten), `scale_measured` GÖRÜNTÜDEN ölçülür. Aynı düğümü
+    # paylaşsalardı zincir kendi kuyruğunu yerdi:
+    #     f_lens → beklenen ölçek → "ölçülen" f_lens
+    # ve panel, girilen f'i "ölçüldü" diye geri yazardı. Ölçüm hiçbir şey
+    # ölçmemiş olurdu ama öyle görünürdü — sessiz ve tehlikeli bir hata.
     add("ölçülen f = ölçekten",
-        ["scale_expected", "scr_f_mm", "scr_pitch_um", "det_pitch_um"],
+        ["scale_measured", "scr_f_mm", "scr_pitch_um", "det_pitch_um"],
         "lens_f_measured_mm",
         lambda sc, fs, ps, pd: sc * (fs / _mm(ps)) * _mm(pd),
         lambda sc, fs, ps, pd: _pos(sc, fs, ps, pd),
@@ -560,6 +568,13 @@ def _build_rules(model: str = "rectilinear") -> list[Rule]:
         lambda f, s: _pos(f, s),
         formula="FOV_ölçülen = " + inv_fmt("boyut/2", "boyut"))
     # Datasheet ile ölçümün farkı — sistemin sağlık göstergesi.
+    # Ölçülen ile beklenen ölçeğin farkı — donanım tanımının görüntüyle
+    # tutarlılığı. `f sapması` ile aynı bilgiyi ölçek uzayında verir.
+    add("ölçek sapması", ["scale_measured", "scale_expected"],
+        "scale_error_pct",
+        lambda m, e: 100.0 * (m - e) / e, lambda m, e: _pos(m, e),
+        formula="sapma% = 100 × (ölçülen − beklenen) / beklenen")
+
     add("f sapması", ["lens_f_measured_mm", "lens_f_mm"], "focal_error_pct",
         lambda fm, fd: 100.0 * (fm - fd) / fd, lambda fm, fd: _pos(fm, fd),
         formula="sapma% = 100 × (f_ölçülen − f_datasheet) / f_datasheet")
@@ -661,7 +676,9 @@ NODE_LABELS: dict[str, str] = {
     "scr_f_mm": "Ekranın ima ettiği f",
     "scr_half_x_deg": "Ekran yarı-kapsama X",
     "scr_half_y_deg": "Ekran yarı-kapsama Y",
-    "scale_expected": "Ekran→dedektör ölçek",
+    "scale_expected": "Ekran→dedektör ölçek (beklenen)",
+    "scale_measured": "Ekran→dedektör ölçek (ÖLÇÜLEN)",
+    "scale_error_pct": "Ölçek sapması",
     "ifov_edge_urad": "IFOV kenar pikseli",
     "ifov_edge_ratio": "Kenar/merkez oranı",
     "fov_eff_diag_deg": "Gerçek FOV (daire kırpık)",
@@ -684,7 +701,7 @@ NODE_UNITS: dict[str, str] = {
     "scr_aw_mm": "mm", "scr_ah_mm": "mm",
     "scr_ang_deg": "°/px", "scr_f_mm": "mm",
     "scr_half_x_deg": "°", "scr_half_y_deg": "°",
-    "scale_expected": "×",
+    "scale_expected": "×", "scale_measured": "×", "scale_error_pct": "%",
     "ifov_edge_urad": "µrad/px", "ifov_edge_ratio": "",
     "fov_eff_diag_deg": "°", "lens_f_measured_mm": "mm",
     "fov_measured_x_deg": "°", "focal_error_pct": "%",

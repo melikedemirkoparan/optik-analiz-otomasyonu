@@ -1651,7 +1651,7 @@ class MainWindow(QMainWindow):
         return g
 
     def _olculen_dugumler(self) -> dict[str, float]:
-        """Son analizden gelen ÖLÇÜLMÜŞ büyüklükler (FOV/IFOV)."""
+        """Son analizden gelen ÖLÇÜLMÜŞ büyüklükler (FOV/IFOV + ölçek)."""
         out: dict[str, float] = {}
         f = getattr(self._son_res, "fov", None) if self._son_res else None
         if f is None:
@@ -1668,6 +1668,18 @@ class MainWindow(QMainWindow):
                 continue
             if math.isfinite(d) and d > 0:
                 out[dugum] = d
+        # Hizalamanın ölçtüğü ölçek — `scale_expected` DEĞİL. Beklenen ölçek
+        # donanımdan türetilir; bu görüntüden gelir ve ikisinin farkı asıl
+        # bilgidir. Aynı düğüme yazılsalardı çözücü kendi türettiğini ölçüm
+        # sanardı.
+        p = getattr(self._son_res, "pointing", None) if self._son_res else None
+        sc = getattr(p, "measured_scale", None) if p else None
+        try:
+            sc = float(sc)
+        except (TypeError, ValueError):
+            sc = None
+        if sc is not None and math.isfinite(sc) and sc > 0:
+            out["scale_measured"] = sc
         return out
 
     # ---------------------------- eylemler ---------------------------------
@@ -2218,7 +2230,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Doldurulamadı",
                                 f"Panel değerleri okunamadı:\n{e}")
             return
-        self.tab_solver.doldur(solver.from_config(cfg))
+        # Donanım + ANALİZDEN GELEN ÖLÇÜMLER. Yalnızca `from_config`
+        # kullanılsaydı sekme ölçülen ölçeği hiç görmezdi ve "Ölçülen f"
+        # panelde dolu olduğu hâlde çözücüde boş kalırdı — kullanıcı
+        # sağda gördüğü sayıyı solda bulamazdı.
+        degerler = solver.from_config(cfg)
+        degerler.update(self._olculen_dugumler())
+        self.tab_solver.doldur(degerler)
         # Projeksiyon modeli de panelden gelsin; FOV<->f bağıntısı ona bağlı.
         model = getattr(cfg.lens, "projection", "rectilinear")
         idx = self.tab_solver.cmb_model.findData(model)

@@ -931,14 +931,41 @@ for _n in ("ifov_edge_urad", "fov_eff_diag_deg", "lens_f_measured_mm",
 
 # Hydra sayılarıyla uçtan uca: ölçek + ekran f'i verilince ölçülen f
 # ve ondan çıkan FOV doğru gelmeli.
+# ÖLÇÜLEN ölçek `scale_measured` düğümüne yazılır — `scale_expected`
+# donanımdan türetilir ve ikisi karışırsa zincir kendi kuyruğunu yer:
+# f → beklenen ölçek → "ölçülen" f. O zaman panel girilen f'i "ölçüldü"
+# diye geri yazar ve hiçbir şey ölçülmemiş olur.
 _r19 = solver.solve({
     "lens_f_mm": 47.7, "det_pitch_um": 18.0,
     "det_w_px": 1024, "det_h_px": 1024,
     "lens_image_circle_mm": 18.112,
-    "scale_expected": 1.24878, "scr_f_mm": 28.9025, "scr_pitch_um": 13.62})
+    "scale_measured": 1.24878, "scr_f_mm": 28.9025, "scr_pitch_um": 13.62})
 kontrol("çözücü ölçülen f'i buluyor",
         abs(_r19.get("lens_f_measured_mm") - 47.7) < 0.01,
         f"{_r19.get('lens_f_measured_mm'):.4f} mm")
+
+# Ölçüm YOKKEN "ölçülen f" üretilmemeli — üretilirse o bir ölçüm değil,
+# girilen değerin kendisidir.
+_r19b = solver.solve({
+    "lens_f_mm": 47.7, "det_pitch_um": 18.0, "det_w_px": 1024,
+    "scr_f_mm": 28.9025, "scr_pitch_um": 13.62})
+kontrol("ölçüm yokken 'ölçülen f' ÜRETİLMİYOR",
+        "lens_f_measured_mm" not in _r19b.values,
+        "döngü kırıldı: f → ölçek → f zinciri yok")
+kontrol("beklenen ölçek yine de türetiliyor",
+        "scale_expected" in _r19b.values,
+        f"{_r19b.get('scale_expected'):.5f} ×")
+
+# Ölçülen ≠ beklenen olduğunda sapma görünmeli.
+_r19c = solver.solve({
+    "lens_f_mm": 47.7, "det_pitch_um": 18.0, "det_w_px": 1024,
+    "scr_f_mm": 28.9025, "scr_pitch_um": 13.62, "scale_measured": 1.26})
+kontrol("ölçek sapması hesaplanıyor",
+        abs(_r19c.get("scale_error_pct") - 0.898) < 0.01,
+        f"%{_r19c.get('scale_error_pct'):+.3f}")
+kontrol("sapma f'e de yansıyor",
+        abs(_r19c.get("lens_f_measured_mm") - 48.128) < 0.01,
+        f"ölçülen f = {_r19c.get('lens_f_measured_mm'):.4f} mm ≠ 47.7 datasheet")
 kontrol("çözücü gerçek FOV'u (daire kırpık) buluyor",
         abs(_r19.get("fov_eff_diag_deg") - 21.5) < 0.01,
         f"{_r19.get('fov_eff_diag_deg'):.4f}°")

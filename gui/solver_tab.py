@@ -54,7 +54,7 @@ GIRDI_GRUPLARI: list[tuple[str, list[str]]] = [
     ("Referans ekran", ["scr_pitch_um", "scr_w_px", "scr_h_px",
                         "scr_aw_mm", "scr_ah_mm", "scr_ang_deg", "scr_f_mm",
                         "scr_half_x_deg", "scr_half_y_deg"]),
-    ("Zincirler arası", ["scale_expected"]),
+    ("Zincirler arası", ["scale_expected", "scale_measured"]),
 ]
 
 # Yalnızca DIŞARIDAN gelebilecek büyüklükler: üreticinin verdiği ya da
@@ -66,7 +66,8 @@ GIRDI_GRUPLARI: list[tuple[str, list[str]]] = [
 DISARIDAN_GELEN: frozenset[str] = frozenset({
     "lens_useful_fov_deg",   # üreticinin kullanılabilir FOV'u
     "lens_image_circle_mm",  # datasheet'te doğrudan verilir
-    "scale_expected",        # görüntüden ölçülür
+    "scale_expected",        # donanımdan türetilir ama girilebilir de
+    "scale_measured",        # GÖRÜNTÜDEN ölçülür — analiz koşmadan yok
 })
 
 # YALNIZCA ÇIKTI olan büyüklükler: girdi olarak sorulmazlar, başka
@@ -81,6 +82,7 @@ TURETILEN_CIKTI: frozenset[str] = frozenset({
     "lens_f_measured_mm",    # ölçekten geri hesaplanan f
     "fov_measured_x_deg",    # ölçülen f'ten çıkan FOV
     "focal_error_pct",       # datasheet ↔ ölçüm sapması
+    "scale_error_pct",       # beklenen ↔ ölçülen ölçek sapması
 })
 
 # Sonuç tablosunda gösterilecek sıra. Girdi olarak sorulmayan türev
@@ -100,6 +102,7 @@ SONUC_SIRASI: list[str] = [
     # sonuçta görünür.
     "ifov_edge_urad", "ifov_edge_ratio", "fov_eff_diag_deg",
     "lens_f_measured_mm", "fov_measured_x_deg", "focal_error_pct",
+    "scale_measured", "scale_error_pct",
 ]
 
 
@@ -340,14 +343,21 @@ class SolverTab(QWidget):
         # En çok aranan büyüklükleri özetin ilk satırında göster. Uzun
         # tabloda FOV'u aramak zorunda kalmak, "hesaplanmamış" izlenimi
         # veriyordu — hesaplanmış olduğu hâlde.
-        one_cikan = []
-        for node in ("fov_x_deg", "ifov_x_urad", "lens_f_mm", "scr_ang_deg"):
+        # En çok aranan büyüklükler özetin ilk satırında. Türetilmiş olanlar
+        # önce gelir (asıl kazanım onlar), ama girilmiş olan da gösterilir:
+        # kullanıcı "FOV kaç çıktı" sorusunun cevabını uzun tabloda aramak
+        # zorunda kalmamalı. Ölçümden gelenler en değerlisi, en başta.
+        one_cikan: list[str] = []
+        for node in ("fov_measured_x_deg", "lens_f_measured_mm",
+                     "fov_x_deg", "ifov_x_urad", "lens_f_mm", "scr_ang_deg"):
             v = res.values.get(node)
-            if v is None or v.is_given:
+            if v is None:
                 continue
-            one_cikan.append(
-                f"{solver.label(node)} = <b>{_fmt(v.value, node)}</b> "
-                f"{solver.unit(node)}".rstrip())
+            etiket = f"{solver.label(node)} = <b>{_fmt(v.value, node)}</b> " \
+                     f"{solver.unit(node)}".rstrip()
+            if v.is_given:
+                etiket += " <span style='font-size:10px'>(girdi)</span>"
+            one_cikan.append(etiket)
         if one_cikan:
             parcalar.append(
                 f"<span style='color:{GOOD}'>" + " · ".join(one_cikan[:3])
