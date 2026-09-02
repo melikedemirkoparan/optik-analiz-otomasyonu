@@ -982,6 +982,54 @@ kontrol("çıktı-only büyüklükler için giriş alanı yok",
         _CIKTI.isdisjoint(set(w18.tab_solver.fields)),
         "kullanıcı bunları girmez, hesaplanır")
 
+
+# ---------------------------------------------------------------------------
+print("\n[20] Nominal değer ÖLÇÜM sayılmaz")
+# `_son_res` analiz koşulmadan da doludur — canlı hesap onu nominal
+# değerlerle doldurur. Bunlar ölçüm DEĞİLDİR. Ayrılmazsa çözücü sekmesi
+# nominal FOV'u "girdi" sanar ve kullanıcı FOV alanını silince onu
+# türetmek yerine geri yazar: "boş bırak, hesaplasın" akışı sessizce bozulur.
+w20 = MainWindow()
+w20.f_system.setCurrentIndex(w20.f_system.findData("CMV4000 + Rodenstock 70mm"))
+w20._apply_system_preset()
+
+kontrol("analiz koşulmadan _son_res dolu (canlı hesap)",
+        w20._son_res is not None and not w20._analiz_sonucu_var,
+        "nominal değerler var ama analiz yapılmadı")
+kontrol("analiz koşulmadan ÖLÇÜM yok",
+        w20._olculen_dugumler() == {},
+        "nominal değerler ölçüm olarak sayılmıyor")
+
+w20.tab_solver.btn_panelden.click()
+kontrol("FOV sekmeye GİRDİ olarak aktarılmıyor",
+        w20.tab_solver.fields["fov_x_deg"].text() == "",
+        "alan boş — türetilecek")
+
+w20.tab_solver.coz()
+_lay = w20.tab_solver.sonuc_lay
+_fov_satir = None
+for _r in range(_lay.rowCount()):
+    _it = _lay.itemAtPosition(_r, 0)
+    if _it and _it.widget() and _it.widget().text() == "FOV X":
+        _fov_satir = _r
+        break
+kontrol("FOV tabloda görünüyor", _fov_satir is not None)
+if _fov_satir is not None:
+    _deger = _lay.itemAtPosition(_fov_satir, 1).widget()
+    _kaynak = _lay.itemAtPosition(_fov_satir, 3).widget().text()
+    kontrol("FOV TÜRETİLMİŞ olarak işaretli",
+            _kaynak != "girdi", _kaynak)
+    kontrol("türetilen değer YEŞİL vurgulu",
+            "#5fd08a" in _deger.styleSheet(),
+            "kullanıcının aradığı sayı öne çıkıyor")
+    kontrol("değer doğru", _deger.text().startswith("9.19"), _deger.text())
+
+# Analiz koşulduğunda ölçümler AKMALI — ayrım ölçümü engellememeli.
+w20._analiz_sonucu_var = True
+kontrol("analiz sonrası ölçümler akıyor",
+        "fov_x_deg" in w20._olculen_dugumler(),
+        "ölçüm varsa aktarılıyor")
+
 print(f"SONUÇ: {GECTI} geçti, {KALDI} kaldı")
 print("=" * 72)
 sys.exit(1 if KALDI else 0)

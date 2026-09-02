@@ -1651,8 +1651,18 @@ class MainWindow(QMainWindow):
         return g
 
     def _olculen_dugumler(self) -> dict[str, float]:
-        """Son analizden gelen ÖLÇÜLMÜŞ büyüklükler (FOV/IFOV + ölçek)."""
+        """
+        GERÇEKTEN ÖLÇÜLMÜŞ büyüklükler — analiz koşulduysa.
+
+        DİKKAT: `_son_res` analiz koşulmadan da doludur; canlı hesap onu
+        nominal değerlerle doldurur. O değerler ÖLÇÜM DEĞİLDİR, donanımdan
+        türetilmiştir. Ayırmazsak çözücü sekmesi nominal FOV'u "girdi"
+        sanar ve kullanıcı FOV alanını silince onu türetmek yerine geri
+        yazar — yani "boş bırak, hesaplasın" akışı sessizce bozulur.
+        """
         out: dict[str, float] = {}
+        if not getattr(self, "_analiz_sonucu_var", False):
+            return out
         f = getattr(self._son_res, "fov", None) if self._son_res else None
         if f is None:
             return out
