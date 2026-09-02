@@ -271,6 +271,7 @@ class BlankableDoubleSpin(QDoubleSpinBox):
 
 SRC_GIVEN = "#7c8798"      # datasheet / kullanıcı girdisi — nötr
 SRC_DERIVED = "#c9a0ff"    # türetildi — dikkat çeksin ama alarm olmasın
+SRC_MEASURED = "#5fd0c8"   # ölçüldü — görüntüden gelen, en değerli kaynak
 
 
 class ResultRow(QWidget):
@@ -388,6 +389,7 @@ class ResultRow(QWidget):
 
         `kind`:
           * ``"given"``   — datasheet ya da kullanıcı girdisi
+          * ``"measured"`` — görüntüden ölçüldü (hesap değil)
           * ``"unit"``    — aynı değerin başka birimde yazılışı
           * ``"derived"`` — gerçek bir bağıntıyla hesaplandı
           * ``None``      — rozet gizlenir (kaynak bilinmiyor/anlamsız)
@@ -404,6 +406,11 @@ class ResultRow(QWidget):
             return
         if kind == "given":
             metin, renk = "datasheet", SRC_GIVEN
+        elif kind == "measured":
+            # GÖRÜNTÜDEN gelen değer. "türetildi" demek onu bir hesap gibi
+            # gösterirdi; oysa hesap değil ÖLÇÜMDÜR ve sistemin gerçek
+            # davranışını anlatır — datasheet'in söylediğini değil.
+            metin, renk = "ölçüldü", SRC_MEASURED
         elif kind == "unit":
             # Birim çevrimi yeni bilgi değil — aynı sayının başka yazılışı.
             # "türetildi" demek hesap yapılmış izlenimi verirdi.

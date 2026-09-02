@@ -464,7 +464,10 @@ _panelden = set(w11.ALAN_DUGUM.values()) | {
     "det_w_px", "det_h_px", "scr_w_px", "scr_h_px"}
 _sekmeden = set(w11.tab_solver.fields)
 _girilebilir = _panelden | _sekmeden
-_eksik = set(solver.NODE_LABELS) - _girilebilir
+# Bazı büyüklükler YALNIZCA ÇIKTIDIR: kenar pikseli, ölçülen f, sapma…
+# Bunlar için giriş alanı açmak yanlış olurdu — kullanıcı bilmez, hesaplanır.
+from gui.solver_tab import TURETILEN_CIKTI as _CIKTI
+_eksik = set(solver.NODE_LABELS) - _girilebilir - _CIKTI
 kontrol("her büyüklüğün girilebilir bir yeri var", not _eksik,
         "eksik yok" if not _eksik
         else ", ".join(sorted(solver.label(n) for n in _eksik)))
@@ -859,6 +862,98 @@ w17._olculen_optigi_yaz(_r17)
 kontrol("büyük ayrışmada uyarı dili",
         "AYRIŞMA VAR" in w17.r_focal_meas._badge.toolTip(),
         "%-64.77 fark")
+
+
+# ---------------------------------------------------------------------------
+print("\n[18] 'ölçüldü' rozeti ve sayılı bağıntılar")
+# "Ölçülen f" satırı `türetildi` diyordu — o bir hesap değil ÖLÇÜM.
+# Ayrıca ipucunda bağıntı yoktu: "türetildi" demek yetmez, hangi
+# formülle ve hangi sayılarla çıktığı da görünmeli.
+from gui.widgets import SRC_MEASURED
+
+w18 = MainWindow()
+w18.show()
+app.processEvents()
+
+
+class _P18:
+    measured_focal_mm = 24.6589
+    focal_error_pct = -0.0004
+    measured_fov_x_deg = 25.7309
+    measured_ifov_urad = 223.04
+    measured_scale = 2.11277
+    screen_implied_focal_mm = 28.9025
+
+
+class _R18:
+    pointing = _P18()
+
+
+_r18 = _R18()
+_r18.fov = compute_fov(w18._config_from_fields())
+w18.f_focal.setValue(24.659)
+w18.f_oled_pitch.setValue(13.62)
+w18.f_pitch_x.setValue(5.5)
+w18._olculen_optigi_yaz(_r18)
+app.processEvents()
+
+kontrol("ölçülen f rozeti 'ölçüldü'",
+        w18.r_focal_meas.source() == "ölçüldü",
+        w18.r_focal_meas.source())
+kontrol("ölçülen FOV rozeti 'ölçüldü'",
+        w18.r_fov_meas.source() == "ölçüldü",
+        w18.r_fov_meas.source())
+kontrol("'ölçüldü' rozeti türetildiden AYRI renkte",
+        SRC_MEASURED not in ("#c9a0ff", "#7c8798"),
+        SRC_MEASURED)
+
+_ip_f = w18.r_focal_meas._badge.toolTip()
+kontrol("ölçülen f ipucunda bağıntı var", "Bağıntı:" in _ip_f)
+kontrol("bağıntı SAYILARLA yazılı",
+        "2.11277" in _ip_f and "28.9025" in _ip_f,
+        "ölçek ve ekran f'i sayı olarak görünüyor")
+_ip_v = w18.r_fov_meas._badge.toolTip()
+kontrol("ölçülen FOV ipucunda bağıntı var",
+        "2·atan" in _ip_v, "FOV = 2·atan( boyut / 2f )")
+kontrol("FOV bağıntısı sayılarla",
+        "24.6589" in _ip_v, "ölçülen f formülde görünüyor")
+
+
+# ---------------------------------------------------------------------------
+print("\n[19] Panelde hesaplanan her büyüklük ÇÖZÜCÜDE de var")
+# Kenar pikseli, gerçek FOV ve ölçülen f panelde hesaplanıyordu ama
+# çözücü bilmiyordu. Aynı büyüklüğün iki ayrı yerde hesaplanması,
+# birinin güncellenip diğerinin unutulmasıyla sessizce ayrışır.
+for _n in ("ifov_edge_urad", "fov_eff_diag_deg", "lens_f_measured_mm",
+           "fov_measured_x_deg", "focal_error_pct"):
+    kontrol(f"{_n} çözücüde düğüm", _n in solver.NODE_LABELS)
+    kontrol(f"{_n} birimi tanımlı", solver.unit(_n) is not None)
+
+# Hydra sayılarıyla uçtan uca: ölçek + ekran f'i verilince ölçülen f
+# ve ondan çıkan FOV doğru gelmeli.
+_r19 = solver.solve({
+    "lens_f_mm": 47.7, "det_pitch_um": 18.0,
+    "det_w_px": 1024, "det_h_px": 1024,
+    "lens_image_circle_mm": 18.112,
+    "scale_expected": 1.24878, "scr_f_mm": 28.9025, "scr_pitch_um": 13.62})
+kontrol("çözücü ölçülen f'i buluyor",
+        abs(_r19.get("lens_f_measured_mm") - 47.7) < 0.01,
+        f"{_r19.get('lens_f_measured_mm'):.4f} mm")
+kontrol("çözücü gerçek FOV'u (daire kırpık) buluyor",
+        abs(_r19.get("fov_eff_diag_deg") - 21.5) < 0.01,
+        f"{_r19.get('fov_eff_diag_deg'):.4f}°")
+kontrol("çözücü kenar pikselini buluyor",
+        _r19.get("ifov_edge_urad") < _r19.get("ifov_x_urad"),
+        f"kenar {_r19.get('ifov_edge_urad'):.2f} < merkez "
+        f"{_r19.get('ifov_x_urad'):.2f} µrad (rektilineerde daralır)")
+kontrol("f sapması hesaplanıyor",
+        abs(_r19.get("focal_error_pct")) < 0.01,
+        f"%{_r19.get('focal_error_pct'):+.4f}")
+
+# Bu büyüklükler YALNIZCA ÇIKTI: giriş alanı açılmamalı.
+kontrol("çıktı-only büyüklükler için giriş alanı yok",
+        _CIKTI.isdisjoint(set(w18.tab_solver.fields)),
+        "kullanıcı bunları girmez, hesaplanır")
 
 print(f"SONUÇ: {GECTI} geçti, {KALDI} kaldı")
 print("=" * 72)

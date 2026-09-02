@@ -1435,9 +1435,23 @@ class MainWindow(QMainWindow):
         else:
             self.r_focal_meas.set_value(f"{fm:.3f}", ACCENT)
             aciklama = f"Görüntüden ölçüldü: {fm:.4f} mm"
-        self.r_focal_meas.set_source("derived", aciklama + "\n\n"
-                                     "f = ölçek × (f_ekran / pitch_ekran) "
-                                     "× pitch_dedektör")
+        # Bağıntı SAYILARLA yazılır: hangi değerlerden, hangi işlemle.
+        p_ = getattr(res, "pointing", None)
+        olcek = getattr(p_, "measured_scale", float("nan")) if p_ else float("nan")
+        f_ekr = getattr(p_, "screen_implied_focal_mm", float("nan")) if p_ else float("nan")
+        p_ekr = self.f_oled_pitch.value()
+        p_det = self.f_pitch_x.value()
+        if all(math.isfinite(x) and x > 0 for x in (olcek, f_ekr, p_ekr, p_det)):
+            baginti = (
+                "\n\nBağıntı:\n"
+                "   f = ölçek × (f_ekran / pitch_ekran) × pitch_dedektör\n"
+                f"     = {olcek:.5f} × ({f_ekr:.4f} mm / {p_ekr:.4f} µm)"
+                f" × {p_det:.4f} µm\n"
+                f"     = {fm:.4f} mm")
+        else:
+            baginti = ("\n\nBağıntı:\n"
+                       "   f = ölçek × (f_ekran / pitch_ekran) × pitch_dedektör")
+        self.r_focal_meas.set_source("measured", aciklama + baginti)
 
         fov_m = getattr(p, "measured_fov_x_deg", float("nan"))
         if math.isfinite(fov_m) and fov_m > 0:
@@ -1448,9 +1462,18 @@ class MainWindow(QMainWindow):
                 d = (fov_m - nominal) / nominal * 100.0
                 ek = (f"\n\nNominal (datasheet f'inden): {nominal:.3f}°\n"
                       f"Fark: %{d:+.2f}")
+            # Her satır HANGİ BAĞINTIYLA hesaplandığını göstermeli;
+            # "türetildi/ölçüldü" demek yetmiyor, formülü de görünmeli.
+            boyut = getattr(res.fov, "sensor_w_mm", float("nan"))
+            bagintI = (f"\n\nBağıntı:\n"
+                       f"   FOV = 2·atan( boyut / 2f )\n"
+                       f"       = 2·atan( {boyut:.4f} mm / (2 × {fm:.4f} mm) )\n"
+                       f"       = {fov_m:.4f}°"
+                       if math.isfinite(boyut) else "")
             self.r_fov_meas.set_source(
-                "derived",
-                f"Ölçülen odak uzaklığından ({fm:.3f} mm) çıkan FOV." + ek
+                "measured",
+                f"Ölçülen odak uzaklığından ({fm:.3f} mm) çıkan FOV."
+                + bagintI + ek
                 + "\n\nİkisi ayrışıyorsa raporlanacak olan BUDUR — ölçüm "
                   "gerçek sistemi, nominal ise girilen parametreleri anlatır.")
         else:

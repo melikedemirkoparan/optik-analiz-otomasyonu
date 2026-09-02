@@ -69,6 +69,20 @@ DISARIDAN_GELEN: frozenset[str] = frozenset({
     "scale_expected",        # görüntüden ölçülür
 })
 
+# YALNIZCA ÇIKTI olan büyüklükler: girdi olarak sorulmazlar, başka
+# değerlerden türetilirler. Bunlar için alan açmak yanlış olurdu —
+# kullanıcı "kenar pikselinin IFOV'unu" bilmez, o hesaplanır.
+# Çözülemediklerinde de eksiklik sayılmazlar: girdiler yetmediği için
+# değil, o girdiler henüz verilmediği için yoklar.
+TURETILEN_CIKTI: frozenset[str] = frozenset({
+    "ifov_edge_urad",        # kenar pikselinin yerel açısı
+    "ifov_edge_ratio",       # kenar/merkez oranı
+    "fov_eff_diag_deg",      # görüntü dairesiyle kırpılmış gerçek FOV
+    "lens_f_measured_mm",    # ölçekten geri hesaplanan f
+    "fov_measured_x_deg",    # ölçülen f'ten çıkan FOV
+    "focal_error_pct",       # datasheet ↔ ölçüm sapması
+})
+
 # Sonuç tablosunda gösterilecek sıra. Girdi olarak sorulmayan türev
 # düğümler (arcsec, yarı-kapsama) burada görünür.
 SONUC_SIRASI: list[str] = [
@@ -82,6 +96,10 @@ SONUC_SIRASI: list[str] = [
     "scr_pitch_um", "scr_w_px", "scr_h_px", "scr_aw_mm", "scr_ah_mm",
     "scr_ang_deg", "scr_f_mm", "scr_half_x_deg", "scr_half_y_deg",
     "scale_expected",
+    # Ölçüme ve daire kısıtına dayanan türevler — girdi olarak sorulmaz,
+    # sonuçta görünür.
+    "ifov_edge_urad", "ifov_edge_ratio", "fov_eff_diag_deg",
+    "lens_f_measured_mm", "fov_measured_x_deg", "focal_error_pct",
 ]
 
 
@@ -337,7 +355,8 @@ class SolverTab(QWidget):
         # Çözülemeyenlerden, DIŞARIDAN gelmesi gereken büyüklükleri ayıkla:
         # onlar türetilemez, boş kalmaları eksiklik değildir. Kalanlar
         # gerçekten "bir girdi daha gerekiyor" diyebileceğimiz olanlardır.
-        eksik = [n for n in res.unresolved if n not in DISARIDAN_GELEN]
+        eksik = [n for n in res.unresolved
+                 if n not in DISARIDAN_GELEN and n not in TURETILEN_CIKTI]
         if eksik:
             adlar = ", ".join(solver.label(n) for n in eksik[:6])
             if len(eksik) > 6:

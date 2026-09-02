@@ -513,6 +513,57 @@ def _build_rules(model: str = "rectilinear") -> list[Rule]:
         lambda h, n: _angle_ok(h) and _pos(n),
         formula="°/px = atan( tan(yarı_X) / (N/2) )")
 
+    # ---------------- Kenar pikseli ----------------
+    # Piksel ölçeği alan boyunca SABİT DEĞİLDİR. Rektilineerde kenar
+    # pikseli merkezden daha küçük bir açı görür (cos²θ ile daralır);
+    # equidistant'ta tanım gereği sabittir. Panel bu değeri gösteriyordu
+    # ama çözücü bilmiyordu — aynı büyüklüğün iki ayrı yerde hesaplanması
+    # §5'teki panel↔tablo ayrışmasının aynısı olurdu.
+    add(f"kenar pikseli ({etiket})",
+        ["det_pitch_um", "lens_f_mm", "fov_x_deg"], "ifov_edge_urad",
+        lambda p, f, fov: proj.ifov_rad(model, f, _mm(p), fov / 2.0) * 1e6,
+        lambda p, f, fov: _pos(p, f) and _angle_ok(fov / 2.0),
+        formula="IFOV_kenar = yarı-FOV açısındaki yerel piksel açısı")
+    # Kenar/merkez oranı: tek bir IFOV sayısının alanı ne kadar temsil
+    # ettiğini söyler. 1'e yakınsa tek sayı yeterli, değilse değil.
+    add("kenar/merkez oranı", ["ifov_edge_urad", "ifov_x_urad"],
+        "ifov_edge_ratio",
+        lambda e, c: e / c, lambda e, c: _pos(e, c),
+        formula="oran = IFOV_kenar / IFOV_merkez")
+
+    # ---------------- Görüntü dairesiyle kırpılmış GERÇEK FOV ----------
+    # Lensin dairesi sensörden küçükse köşeler karanlıktır ve sistemin
+    # FOV'u geometrik değer DEĞİL, dairenin kırptığı değerdir. Hydra'da
+    # geometrik köşegen 30.56°, gerçek FOV 21.50° — ikisi de doğru sayı
+    # ama yalnızca biri "sistemin FOV'u" sorusunun cevabı.
+    add(f"gerçek FOV = daire kırpması ({etiket})",
+        ["lens_f_mm", "lens_image_circle_mm"], "fov_eff_diag_deg",
+        lambda f, d: proj.full_fov_deg(model, f, d),
+        lambda f, d: _pos(f, d),
+        formula="gerçek FOV = " + inv_fmt("çap/2", "çap")
+                + "   (daire sensörden küçükken)")
+
+    # ---------------- ÖLÇÜMDEN gelen odak uzaklığı ----------------
+    # Ölçek görüntüden ölçülür; ekranın açısal ölçeği biliniyorsa lensin
+    # f'i ondan çıkar. `scale_expected` düğümü ölçülen ölçekle beslenir.
+    # Bu, panelin "Ölçülen f" satırının çözücüdeki karşılığıdır — aynı
+    # bağıntının iki yerde ayrı yazılması ayrışma riski doğururdu.
+    add("ölçülen f = ölçekten",
+        ["scale_expected", "scr_f_mm", "scr_pitch_um", "det_pitch_um"],
+        "lens_f_measured_mm",
+        lambda sc, fs, ps, pd: sc * (fs / _mm(ps)) * _mm(pd),
+        lambda sc, fs, ps, pd: _pos(sc, fs, ps, pd),
+        formula="f_ölçülen = ölçek × (f_ekran / pitch_ekran) × pitch_det")
+    add(f"ölçülen FOV ({etiket})",
+        ["lens_f_measured_mm", "det_w_mm"], "fov_measured_x_deg",
+        lambda f, s: proj.full_fov_deg(model, f, s),
+        lambda f, s: _pos(f, s),
+        formula="FOV_ölçülen = " + inv_fmt("boyut/2", "boyut"))
+    # Datasheet ile ölçümün farkı — sistemin sağlık göstergesi.
+    add("f sapması", ["lens_f_measured_mm", "lens_f_mm"], "focal_error_pct",
+        lambda fm, fd: 100.0 * (fm - fd) / fd, lambda fm, fd: _pos(fm, fd),
+        formula="sapma% = 100 × (f_ölçülen − f_datasheet) / f_datasheet")
+
     # ---------------- Görüntü dairesi (üreticinin kullanılabilir FOV'u) ----
     # `useful_fov_deg` ÜRETİCİNİN VERDİĞİ bir sayıdır — türetilmiş değil,
     # datasheet girdisidir. Çözücüye tanıtılmazsa arayüz o satırı başka bir
@@ -611,6 +662,12 @@ NODE_LABELS: dict[str, str] = {
     "scr_half_x_deg": "Ekran yarı-kapsama X",
     "scr_half_y_deg": "Ekran yarı-kapsama Y",
     "scale_expected": "Ekran→dedektör ölçek",
+    "ifov_edge_urad": "IFOV kenar pikseli",
+    "ifov_edge_ratio": "Kenar/merkez oranı",
+    "fov_eff_diag_deg": "Gerçek FOV (daire kırpık)",
+    "lens_f_measured_mm": "Ölçülen odak uzaklığı",
+    "fov_measured_x_deg": "Ölçülen FOV X",
+    "focal_error_pct": "f sapması",
 }
 
 NODE_UNITS: dict[str, str] = {
@@ -628,6 +685,9 @@ NODE_UNITS: dict[str, str] = {
     "scr_ang_deg": "°/px", "scr_f_mm": "mm",
     "scr_half_x_deg": "°", "scr_half_y_deg": "°",
     "scale_expected": "×",
+    "ifov_edge_urad": "µrad/px", "ifov_edge_ratio": "",
+    "fov_eff_diag_deg": "°", "lens_f_measured_mm": "mm",
+    "fov_measured_x_deg": "°", "focal_error_pct": "%",
 }
 
 
