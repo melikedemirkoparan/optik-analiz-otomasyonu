@@ -772,6 +772,94 @@ kontrol("çelişki büyüklük başına tekilleştiriliyor",
 kontrol("girilen değerin korunduğu söyleniyor",
         "korundu" in _c)
 
+
+# ---------------------------------------------------------------------------
+print("\n[17] Ölçümden gelen odak uzaklığı — bağımsız doğrulama")
+# Panelin geri kalanı datasheet f'ine dayanır. Bu iki satır GÖRÜNTÜDEN
+# gelir: hizalamanın ölçtüğü ölçek, ekranın açısal ölçeği biliniyorsa
+# lensin f'ini verir. Ayrışma odak kayması/montaj/yanlış parametre demektir
+# ve panelin başka hiçbir satırı bunu yakalayamaz.
+from core import pointing as _pointing, projection as _proj
+from core.config import SCREEN_CATALOG as _SCR
+
+_stos = _SCR["STOS (1280×1024, 13.62µm, 0.027°/px)"]
+_pd = 5.5e-3
+_ps = _stos.pixel_pitch_um / 1000.0
+_fs = _stos.implied_focal_mm
+
+# Ters hesap TAM olmalı: bilinen f'ten ölçek üret, ölçekten f'i geri oku.
+for _f in (47.7, 24.659, 70.0):
+    _olcek = (_f / _pd) / (_fs / _ps)
+    _geri = _olcek * (_fs / _ps) * _pd
+    kontrol(f"ölçekten f geri okunuyor (f={_f})", abs(_geri - _f) < 1e-9,
+            f"{_geri:.6f} mm")
+
+kontrol("STOS açısal kaynak olarak tanınıyor",
+        _stos.angular_res_deg > 0 and _fs > 0,
+        f"°/px={_stos.angular_res_deg}, ima edilen f={_fs:.3f} mm")
+
+# Pasif panelde ölçek f vermez: iki bilinmeyenli tek denklem kalır.
+_oled = _SCR["GL049AMN10A OLED (1920×1080, 5.616µm)"]
+kontrol("pasif panelde açısal ölçek yok",
+        _oled.angular_res_deg == 0.0,
+        "ölçek tek başına f vermez — bu doğru davranış")
+
+# Panel satırları: ölçüm yoksa GİZLİ olmalı, boş "—" değil.
+w17 = MainWindow()
+w17.show()
+app.processEvents()
+kontrol("ölçüm yokken 'Ölçülen f' gizli", not w17.r_focal_meas.isVisible())
+kontrol("ölçüm yokken 'Ölçülen FOV' gizli", not w17.r_fov_meas.isVisible())
+
+# Satırlar FOV grubunun layout'unda duruyor mu? `_fov_satir_sirala`
+# listelemezse widget layout'tan düşer ve setVisible(True) işe yaramaz.
+w17._fov_satir_sirala(False)
+_layout_widgets = [w17._fov_layout.itemAt(i).widget()
+                   for i in range(w17._fov_layout.count())]
+kontrol("ölçüm satırları FOV layout'unda kalıyor",
+        w17.r_focal_meas in _layout_widgets and w17.r_fov_meas in _layout_widgets,
+        f"{len(_layout_widgets)} satır")
+w17._fov_satir_sirala(True)
+_layout_widgets = [w17._fov_layout.itemAt(i).widget()
+                   for i in range(w17._fov_layout.count())]
+kontrol("daire kısıtlı dizilişte de kalıyor",
+        w17.r_focal_meas in _layout_widgets and w17.r_fov_meas in _layout_widgets)
+
+# Sentetik bir PointingResult ile panel doldurma yolunu denetle.
+class _P:
+    measured_focal_mm = 24.659
+    focal_error_pct = -0.001
+    measured_fov_x_deg = 25.731
+    measured_ifov_urad = 223.0
+
+
+class _R:
+    pointing = _P()
+    fov = compute_fov(w17._config_from_fields())
+
+
+w17.f_focal.setValue(24.659)
+_r17 = _R()
+_r17.fov = compute_fov(w17._config_from_fields())
+w17._olculen_optigi_yaz(_r17)
+app.processEvents()
+kontrol("ölçüm varken satır görünür", w17.r_focal_meas.isVisible())
+kontrol("ölçülen f değeri yazılıyor",
+        "24.659" in w17.r_focal_meas._value.text(),
+        w17.r_focal_meas._value.text())
+kontrol("uyumlu ölçümde ipucu 'uyumlu' diyor",
+        "uyumlu" in w17.r_focal_meas._badge.toolTip(),
+        "%0'a yakın fark")
+kontrol("bağıntı ipucunda yazılı",
+        "pitch_ekran" in w17.r_focal_meas._badge.toolTip())
+
+# Ayrışma büyükse uyarı diline geçmeli.
+_P.focal_error_pct = -64.77
+w17._olculen_optigi_yaz(_r17)
+kontrol("büyük ayrışmada uyarı dili",
+        "AYRIŞMA VAR" in w17.r_focal_meas._badge.toolTip(),
+        "%-64.77 fark")
+
 print(f"SONUÇ: {GECTI} geçti, {KALDI} kaldı")
 print("=" * 72)
 sys.exit(1 if KALDI else 0)

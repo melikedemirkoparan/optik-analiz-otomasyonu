@@ -141,6 +141,16 @@ class PointingResult:
     expected_scale: float = float("nan")   # GT->dedektör beklenen ölçek
     measured_scale: float = float("nan")   # hizalamanın ölçtüğü
     scale_error_pct: float = float("nan")  # ikisinin farkı (%)
+    # --- ÖLÇÜMDEN geri hesaplanan optik ---
+    # Ölçek görüntüden ölçülür; ekranın açısal ölçeği biliniyorsa lensin
+    # odak uzaklığı ondan TERS yönde çıkar. Datasheet'teki f ile bu
+    # ölçülen f'in farkı, lensin gerçekten beklenen yerde odaklanıp
+    # odaklanmadığını gösterir — odak kayması, montaj hatası ya da yanlış
+    # girilmiş bir parametre burada görünür.
+    measured_focal_mm: float = float("nan")     # ölçekten çıkan f_lens
+    focal_error_pct: float = float("nan")       # datasheet f'ine göre fark
+    measured_fov_x_deg: float = float("nan")    # ölçülen f'ten çıkan FOV
+    measured_ifov_urad: float = float("nan")    # ölçülen f'ten çıkan IFOV
 
     # --- Bağlam ---
     fov_x_deg: float = float("nan")
@@ -532,12 +542,53 @@ def measure_pointing(H: np.ndarray,
                 if (math.isfinite(r_det) and math.isfinite(r_scr)
                         and r_scr > 0):
                     res.expected_scale = float(r_det / r_scr)
-            if t is not None:
-                meas = 0.5 * (abs(t.scale_x) + abs(t.scale_y))
+            if t is not None and math.isfinite(res.measured_scale) \
+                    and res.expected_scale > 0:
+                res.scale_error_pct = float(
+                    100.0 * (res.measured_scale - res.expected_scale)
+                    / res.expected_scale)
+
+        # --- ÖLÇÜLEN ÖLÇEK: ekrandan bağımsız kaydedilir ---
+        # Hizalamanın bulduğu ölçek, referans ekranın açısal kaynak olup
+        # olmamasından BAĞIMSIZ bir ölçümdür. Eskiden `implied_focal_mm > 0`
+        # bloğunun içindeydi; pasif panelde (angular_res_deg = 0) ölçüm
+        # yapılmış olmasına rağmen kaydedilmiyordu.
+        if t is not None:
+            meas = 0.5 * (abs(t.scale_x) + abs(t.scale_y))
+            if math.isfinite(meas) and meas > 0:
                 res.measured_scale = float(meas)
-                if res.expected_scale > 0:
-                    res.scale_error_pct = float(
-                        100.0 * (meas - res.expected_scale) / res.expected_scale)
+
+        # --- TERS YÖN: ölçekten lensin odak uzaklığı ---
+        #
+        #     ölçek = (f_lens / pitch_det) / (f_ekran / pitch_ekran)
+        #  -> f_lens = ölçek × (f_ekran / pitch_ekran) × pitch_det
+        #
+        # Bu, lensin odak uzaklığının GÖRÜNTÜDEN ölçülmesidir. Şart:
+        # ekranın açısal ölçeği bilinmeli (`implied_focal_mm`), yani
+        # referans ekran açısal kaynak olmalı. Pasif panelde ölçek tek
+        # başına f vermez — iki bilinmeyenli tek denklem kalır.
+        #
+        # Rektilineer dışındaki modellerde tan/tan sadeleşmesi geçerli
+        # değildir; oran açıyla değişir ve tek bir f'e çevrilemez.
+        if (math.isfinite(res.measured_scale) and res.measured_scale > 0
+                and pitch_det_mm > 0 and pitch_scr_mm > 0
+                and scr.implied_focal_mm > 0
+                and _lens_model(cfg) == projection.RECTILINEAR):
+            f_olculen = float(res.measured_scale
+                              * (scr.implied_focal_mm / pitch_scr_mm)
+                              * pitch_det_mm)
+            if math.isfinite(f_olculen) and f_olculen > 0:
+                res.measured_focal_mm = f_olculen
+                f_ds = cfg.lens.focal_length_mm
+                if f_ds > 0:
+                    res.focal_error_pct = float(
+                        100.0 * (f_olculen - f_ds) / f_ds)
+                # Ölçülen f'ten FOV ve IFOV — datasheet f'i yerine ÖLÇÜMÜN
+                # söylediği optikle aynı geometri.
+                res.measured_fov_x_deg = float(projection.full_fov_deg(
+                    projection.RECTILINEAR, f_olculen, det.sensor_width_mm))
+                res.measured_ifov_urad = float(projection.ifov_rad(
+                    projection.RECTILINEAR, f_olculen, pitch_det_mm) * 1e6)
 
     # --- 3B. Kapsama: karşılaştırma bölgesi ∩ sensörün aydınlık alanı ---
     #

@@ -736,9 +736,37 @@ class MainWindow(QMainWindow):
                                      "kullanılabilir FOV'undan BÜYÜK çıkması "
                                      "beklenen yöndür: useful FOV köşe kalitesi "
                                      "düştüğü için dar tanımlanır.")
+        # --- ÖLÇÜMDEN gelen optik: bağımsız doğrulama ---
+        # Buraya kadarki her şey datasheet f'ine dayanır. Bu iki satır ise
+        # GÖRÜNTÜDEN gelir: hizalamanın ölçtüğü ölçek, referans ekranın
+        # açısal ölçeği biliniyorsa lensin odak uzaklığını verir. Datasheet
+        # ile ölçümün ayrışması odak kayması, montaj hatası ya da yanlış
+        # girilmiş bir parametre demektir — panelin başka hiçbir satırı
+        # bunu yakalayamaz.
+        self.r_focal_meas = ResultRow(
+            "Ölçülen f", "mm",
+            "Lensin odak uzaklığının GÖRÜNTÜDEN ölçülen değeri.\n\n"
+            "Hizalama, ground truth'un bir pikselinin dedektörde kaç piksele "
+            "düştüğünü ölçer (ölçek). Referans ekranın açısal ölçeği "
+            "biliniyorsa bu ölçek lensin f'ini verir:\n"
+            "   f_lens = ölçek × (f_ekran / pitch_ekran) × pitch_dedektör\n\n"
+            "Datasheet değeriyle karşılaştırılır; ayrışma gerçek bir "
+            "fiziksel farka işaret eder.\n\n"
+            "Yalnızca referans ekran AÇISAL KAYNAK ise (°/px girilmişse) ve "
+            "projeksiyon rektilineer ise hesaplanır.")
+        self.r_fov_meas = ResultRow(
+            "Ölçülen FOV", "°",
+            "Ölçülen odak uzaklığından çıkan FOV — yani sistemin gerçekte "
+            "gördüğü açı.\n\n"
+            "Yukarıdaki nominal FOV datasheet f'ine dayanır; bu satır "
+            "ölçüme dayanır. İkisi ayrışıyorsa raporlanacak olan budur.")
+        self.r_focal_meas.setVisible(False)
+        self.r_fov_meas.setVisible(False)
+
         # Başlangıç sırası = daire kapsıyor hali (en yaygın durum).
         for r in (self.r_fov_xy, self.r_fov_d, self.r_fov_eff,
-                  self.r_fov_circle, self.r_fov_fill, self.r_fov_check):
+                  self.r_fov_circle, self.r_fov_fill, self.r_fov_check,
+                  self.r_focal_meas, self.r_fov_meas):
             fl.addWidget(r)
         lay.addWidget(gb_fov)
 
@@ -1358,6 +1386,76 @@ class MainWindow(QMainWindow):
         "f_oled_ah": "scr_ah_mm",
         "f_scr_ang": "scr_ang_deg",
     }
+
+    def _olculen_optigi_yaz(self, res):
+        """
+        Görüntüden ölçülen odak uzaklığını ve ondan çıkan FOV'u yazar.
+
+        Panelin geri kalanı datasheet f'ine dayanır; bu iki satır ÖLÇÜME
+        dayanır ve bağımsız bir doğrulamadır. Ayrışma varsa fiziksel bir
+        sebebi vardır (odak kayması, montaj, yanlış parametre) ve panelin
+        başka hiçbir satırı bunu yakalayamaz.
+
+        Ölçüm yoksa satırlar GİZLENİR — boş bir "—" göstermek, hesaplanmış
+        ama sonuçsuz kalmış izlenimi verirdi; oysa koşul hiç sağlanmamıştır.
+        """
+        p = getattr(res, "pointing", None)
+        fm = getattr(p, "measured_focal_mm", float("nan")) if p else float("nan")
+        if not (p is not None and math.isfinite(fm) and fm > 0):
+            self.r_focal_meas.clear()
+            self.r_fov_meas.clear()
+            self.r_focal_meas.setVisible(False)
+            self.r_fov_meas.setVisible(False)
+            return
+
+        self.r_focal_meas.setVisible(True)
+        self.r_fov_meas.setVisible(True)
+
+        f_ds = self.f_focal.value()
+        hata = getattr(p, "focal_error_pct", float("nan"))
+        # Eşik %2: datasheet yuvarlamaları ve hizalamanın kendi hatası bu
+        # aralığa sığar; gerçek bir odak kayması sığmaz.
+        iyi = math.isfinite(hata) and abs(hata) < 2.0
+        if math.isfinite(hata) and f_ds > 0:
+            self.r_focal_meas.set_value(
+                f"{fm:.3f}   (%{hata:+.2f})", GOOD if iyi else WARN)
+            aciklama = (
+                f"Görüntüden ölçüldü: {fm:.4f} mm\n"
+                f"Datasheet değeri:   {f_ds:.4f} mm\n"
+                f"Fark: %{hata:+.2f}\n\n")
+            aciklama += (
+                "Ölçüm datasheet ile uyumlu — lens beklenen yerde "
+                "odaklanıyor ve girilen parametreler tutarlı."
+                if iyi else
+                "AYRIŞMA VAR. Olası sebepler: lens odak kaymış, sensör "
+                "beklenen mesafede değil, ya da girilen piksel pitch'i / "
+                "ekran açısal çözünürlüğü yanlış.\n\n"
+                "Hangisinin yanlış olduğunu bu ölçüm tek başına söylemez; "
+                "ama bir şeyin yanlış olduğunu söyler.")
+        else:
+            self.r_focal_meas.set_value(f"{fm:.3f}", ACCENT)
+            aciklama = f"Görüntüden ölçüldü: {fm:.4f} mm"
+        self.r_focal_meas.set_source("derived", aciklama + "\n\n"
+                                     "f = ölçek × (f_ekran / pitch_ekran) "
+                                     "× pitch_dedektör")
+
+        fov_m = getattr(p, "measured_fov_x_deg", float("nan"))
+        if math.isfinite(fov_m) and fov_m > 0:
+            nominal = getattr(res.fov, "fov_x_deg", float("nan"))
+            self.r_fov_meas.set_value(f"{fov_m:.3f}", GOOD if iyi else WARN)
+            ek = ""
+            if math.isfinite(nominal) and nominal > 0:
+                d = (fov_m - nominal) / nominal * 100.0
+                ek = (f"\n\nNominal (datasheet f'inden): {nominal:.3f}°\n"
+                      f"Fark: %{d:+.2f}")
+            self.r_fov_meas.set_source(
+                "derived",
+                f"Ölçülen odak uzaklığından ({fm:.3f} mm) çıkan FOV." + ek
+                + "\n\nİkisi ayrışıyorsa raporlanacak olan BUDUR — ölçüm "
+                  "gerçek sistemi, nominal ise girilen parametreleri anlatır.")
+        else:
+            self.r_fov_meas.clear()
+            self.r_fov_meas.setVisible(False)
 
     def _canli_hesapla(self):
         """
@@ -2010,20 +2108,25 @@ class MainWindow(QMainWindow):
         Sabit sırada geometrik satırlar üstte kalırdı ve kullanıcı ilk
         gördüğü sayıyı okurdu.
         """
+        # Ölçümden gelen satırlar HER İKİ dizilişte de sonda durur: onlar
+        # nominal hesabın alternatifi değil, DOĞRULAMASIDIR. Listeye dahil
+        # edilmezlerse `removeWidget`/`addWidget` turunda layout'tan düşer
+        # ve `setVisible(True)` dense bile görünmezler.
+        olcum = (self.r_focal_meas, self.r_fov_meas)
         if daire_kisitli:
             sira = (self.r_fov_eff,       # CEVAP
                     self.r_fov_circle,    # cevabı belirleyen kısıt
                     self.r_fov_fill,      # kısıtın bedeli
                     self.r_fov_xy,        # ara veri: saf geometri
                     self.r_fov_d,
-                    self.r_fov_check)
+                    self.r_fov_check) + olcum
         else:
             sira = (self.r_fov_xy,        # CEVAP
                     self.r_fov_d,
                     self.r_fov_eff,       # gizli (kapsıyorsa aynı sayı)
                     self.r_fov_circle,
                     self.r_fov_fill,
-                    self.r_fov_check)
+                    self.r_fov_check) + olcum
         # Sıra zaten doğruysa layout'a dokunma — her sonuçta widget
         # söküp takmak gereksiz yeniden çizim demektir.
         mevcut = [self._fov_layout.itemAt(i).widget()
@@ -2068,7 +2171,8 @@ class MainWindow(QMainWindow):
         self.r_fov_d.set_label("Köşegen")
         self.r_ifov_edge.set_label("Kenar pikseli")
         for r in (self.r_fov_eff, self.r_fov_circle, self.r_fov_fill,
-                  self.r_fov_model, self.r_cov_maxang):
+                  self.r_fov_model, self.r_cov_maxang,
+                  self.r_focal_meas, self.r_fov_meas):
             r.setVisible(False)
         self._fov_satir_sirala(False)
         self.gb_tilt.setVisible(False)
@@ -2300,6 +2404,9 @@ class MainWindow(QMainWindow):
                 self.r_fov_check.set_source("derived", aciklama)
             else:
                 self.r_fov_check.clear()
+
+            # --- ÖLÇÜMDEN gelen odak uzaklığı ve FOV ---
+            self._olculen_optigi_yaz(res)
 
             # ---- 2) IFOV — tek pikselin gördüğü açı ----
             # Piksel kare değilse iki eksen ayrı gösterilir.
